@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.git/
+.gitignore
+.setup-complete
+runtime/
+*.bat
+scripts/verify_camoufox_install.py
