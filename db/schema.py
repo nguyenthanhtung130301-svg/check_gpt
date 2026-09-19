@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS job_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
     line TEXT NOT NULL,
-    created_at REAL NOT NULL DEFAULT (unixepoch('subsec'))
+    created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
 );
 """
 
@@ -346,7 +346,7 @@ MIGRATIONS: dict[int, list[str]] = {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
             line TEXT NOT NULL,
-            created_at REAL NOT NULL DEFAULT (unixepoch('subsec'))
+            created_at REAL NOT NULL DEFAULT (strftime('%s','now'))
         );""",
         # 7. Restore logs từ backup
         """INSERT INTO job_logs (id, job_id, line, created_at)

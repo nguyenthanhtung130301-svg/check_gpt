@@ -1784,8 +1784,8 @@ class JobRepository:
                 # Atomic: insert log line trong cùng transaction nếu có
                 if log_line is not None:
                     conn.execute(
-                        "INSERT INTO job_logs (job_id, line) VALUES (?, ?)",
-                        (job_id, log_line),
+                        "INSERT INTO job_logs (job_id, line, created_at) VALUES (?, ?, ?)",
+                        (job_id, log_line, time.time()),
                     )
         except RepositoryError:
             raise
@@ -1805,8 +1805,8 @@ class JobRepository:
         try:
             with self._engine.get_connection() as conn:
                 conn.execute(
-                    "INSERT INTO job_logs (job_id, line) VALUES (?, ?)",
-                    (job_id, line),
+                    "INSERT INTO job_logs (job_id, line, created_at) VALUES (?, ?, ?)",
+                    (job_id, line, time.time()),
                 )
         except Exception as exc:
             raise RepositoryError("append_log", exc) from exc
