@@ -1,19 +1,24 @@
 <!doctype html>
 <html lang="vi">
+
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="description" content="Lehaipreshop - bộ công cụ kiểm tra và cập nhật tài khoản tại máy.">
   <meta name="theme-color" content="#0c0f0b">
-  <title>Lehaipreshop</title>
+  <title>DangTuanGPT</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link
+    href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet">
   <link rel="stylesheet" href="/assets/index.css">
   <link rel="stylesheet" href="/assets/dashboard.css">
 </head>
+
 <body>
-  <div class="ambient ambient-a"></div><div class="ambient ambient-b"></div>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
   <div class="app-shell">
     <aside class="rail" aria-label="Điều hướng">
       <a class="brand-orb" href="#top" aria-label="Lehaipreshop">
@@ -30,8 +35,8 @@
     <main id="top">
       <header class="topbar compact-topbar">
         <div class="brand-copy">
-          <span class="eyebrow">LEHAIPRESHOP</span>
-          <h1>Lehaipreshop</h1>
+          <span class="eyebrow">DangTuan</span>
+          <h1>DangTuan</h1>
           <p>Bộ công cụ riêng để kiểm tra và cập nhật tài khoản ngay trên máy.</p>
         </div>
         <div class="top-actions">
@@ -56,29 +61,36 @@
       <section class="workbench-grid" aria-label="Nhập và xuất dữ liệu">
         <article class="composer glass">
           <div class="section-head">
-            <div><span class="eyebrow">Đầu vào</span><h2>Danh sách tài khoản</h2></div>
+            <div><span class="eyebrow">Đầu vào</span>
+              <h2>Danh sách tài khoản</h2>
+            </div>
             <span id="line-count" class="counter">0 dòng</span>
           </div>
           <label for="combo-input" class="input-label">Định dạng mỗi dòng: email|password|2FA_cũ</label>
           <div class="editor-wrap">
             <div id="line-numbers" class="line-numbers">1</div>
-            <textarea id="combo-input" wrap="off" spellcheck="false" autocomplete="off" aria-describedby="format-note"></textarea>
+            <textarea id="combo-input" wrap="off" spellcheck="false" autocomplete="off"
+              aria-describedby="format-note"></textarea>
             <span class="cursor-hint">email|password|2FA_cũ</span>
           </div>
           <div class="composer-foot">
             <p id="format-note"><span>◈</span> Dữ liệu được giữ trong máy này.</p>
             <div class="launch-row">
               <div class="mode-selector" role="group" aria-label="Chọn chế độ xử lý">
-                <button id="mode-check-only" class="mode-btn active" data-mode="check_only" title="Chỉ kiểm tra Live/Free/Plus">
+                <button id="mode-check-only" class="mode-btn active" data-mode="check_only"
+                  title="Chỉ kiểm tra Live/Free/Plus">
                   <span class="mode-icon">✓</span><span class="mode-label">Kiểm tra</span>
                 </button>
-                <button id="mode-change-2fa" class="mode-btn" data-mode="change_2fa" title="Đổi khóa 2FA, giữ nguyên mật khẩu">
+                <button id="mode-change-2fa" class="mode-btn" data-mode="change_2fa"
+                  title="Đổi khóa 2FA, giữ nguyên mật khẩu">
                   <span class="mode-icon">⟳</span><span class="mode-label">Đổi 2FA</span>
                 </button>
-                <button id="mode-change-password" class="mode-btn" data-mode="change_password" title="Đổi mật khẩu, giữ nguyên 2FA">
+                <button id="mode-change-password" class="mode-btn" data-mode="change_password"
+                  title="Đổi mật khẩu, giữ nguyên 2FA">
                   <span class="mode-icon">🔑</span><span class="mode-label">Đổi Pass</span>
                 </button>
-                <button id="mode-change-both" class="mode-btn" data-mode="change_password_and_2fa" title="Đổi cả mật khẩu lẫn 2FA">
+                <button id="mode-change-both" class="mode-btn" data-mode="change_password_and_2fa"
+                  title="Đổi cả mật khẩu lẫn 2FA">
                   <span class="mode-icon">⬡</span><span class="mode-label">Pass+2FA</span>
                 </button>
               </div>
@@ -88,7 +100,8 @@
                 </button>
                 <label class="concurrency-control" for="quick-concurrency">
                   <span>Luồng</span>
-                  <input id="quick-concurrency" type="number" min="1" max="10" inputmode="numeric" aria-label="Số luồng chạy đồng thời">
+                  <input id="quick-concurrency" type="number" min="1" max="10" inputmode="numeric"
+                    aria-label="Số luồng chạy đồng thời">
                 </label>
                 <button id="launch-batch" class="button primary"><span>Bắt đầu</span><b>→</b></button>
               </div>
@@ -98,13 +111,17 @@
 
         <article id="output-panel" class="output-card glass">
           <div class="section-head output-head">
-            <div><span class="eyebrow">Đầu ra</span><h2>Combo hợp lệ</h2></div>
+            <div><span class="eyebrow">Đầu ra</span>
+              <h2>Combo hợp lệ</h2>
+            </div>
             <span id="output-count" class="counter success-counter">0 tài khoản</span>
           </div>
           <p class="output-note">Sẵn sàng để sao chép hoặc xuất file ngay sau khi hoàn tất.</p>
           <div class="output-wrap">
-            <textarea id="success-output" wrap="off" readonly spellcheck="false" aria-label="Tài khoản đã đổi 2FA thành công"></textarea>
-            <div id="output-empty" class="output-empty"><span>✓</span><strong>Chưa có combo hoàn tất</strong><small>Kết quả đã xác minh sẽ xuất hiện ở đây.</small></div>
+            <textarea id="success-output" wrap="off" readonly spellcheck="false"
+              aria-label="Tài khoản đã đổi 2FA thành công"></textarea>
+            <div id="output-empty" class="output-empty"><span>✓</span><strong>Chưa có combo hoàn tất</strong><small>Kết
+                quả đã xác minh sẽ xuất hiện ở đây.</small></div>
           </div>
           <div class="output-actions">
             <button id="copy-output" class="button ghost" disabled><span>Copy tất cả</span><b>⧉</b></button>
@@ -115,25 +132,46 @@
 
       <section id="queue" class="queue-section glass compact-queue">
         <div class="section-head queue-head">
-          <div><span class="eyebrow">Nhật ký chạy</span><h2>Hàng đợi xử lý</h2></div>
+          <div><span class="eyebrow">Nhật ký chạy</span>
+            <h2>Hàng đợi xử lý</h2>
+          </div>
           <div class="queue-tools">
-            <button id="copy-failed" class="button failed-copy" disabled><span>⧉</span> Copy tài khoản lỗi <b id="copy-failed-count">0</b></button>
-            <button id="retry-failed" class="button retry" disabled><span>↻</span> Chạy lại lỗi <b id="retry-failed-count">0</b></button>
+            <button id="copy-failed" class="button failed-copy" disabled><span>⧉</span> Copy tài khoản lỗi <b
+                id="copy-failed-count">0</b></button>
+            <button id="retry-failed" class="button retry" disabled><span>↻</span> Chạy lại lỗi <b
+                id="retry-failed-count">0</b></button>
             <button id="stop-all" class="button danger">Dừng tất cả</button>
             <button id="clear-all" class="button ghost">Dọn danh sách</button>
           </div>
         </div>
         <div class="filter-row" role="tablist">
           <button id="filter-all" class="filter active" data-filter="all">Tất cả <b id="count-all">0</b></button>
-          <button id="filter-running" class="filter" data-filter="running">Đang chạy <b id="count-running">0</b></button>
-          <button id="filter-success" class="filter" data-filter="success">Thành công <b id="count-success">0</b></button>
+          <button id="filter-running" class="filter" data-filter="running">Đang chạy <b
+              id="count-running">0</b></button>
+          <button id="filter-success" class="filter" data-filter="success">Thành công <b
+              id="count-success">0</b></button>
           <button id="filter-error" class="filter" data-filter="error">Lỗi <b id="count-error">0</b></button>
-          <button id="filter-verify-failed" class="filter verify-filter" data-filter="verify_failed">Lỗi verify · 2FA đã đổi <b id="count-verify-failed">0</b></button>
+          <button id="filter-verify-failed" class="filter verify-filter" data-filter="verify_failed">Lỗi verify · 2FA đã
+            đổi <b id="count-verify-failed">0</b></button>
         </div>
         <div class="queue-body">
           <div class="table-wrap">
-            <table><thead><tr><th>Tài khoản · Chế độ</th><th>Trạng thái · Gói</th><th>Kiểm tra tài khoản</th><th>Retry</th><th></th></tr></thead><tbody id="job-list"></tbody></table>
-            <div id="empty-state" class="empty-state"><span>⌁</span><h3>Chưa có tác vụ</h3><p>Dán danh sách và chọn chế độ để bắt đầu.</p></div>
+            <table>
+              <thead>
+                <tr>
+                  <th>Tài khoản · Chế độ</th>
+                  <th>Trạng thái · Gói</th>
+                  <th>Kiểm tra tài khoản</th>
+                  <th>Retry</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="job-list"></tbody>
+            </table>
+            <div id="empty-state" class="empty-state"><span>⌁</span>
+              <h3>Chưa có tác vụ</h3>
+              <p>Dán danh sách và chọn chế độ để bắt đầu.</p>
+            </div>
           </div>
           <div id="inline-log-panel" class="inline-log-panel" style="display:none">
             <div class="inline-log-head">
@@ -146,35 +184,41 @@
             </div>
             <div id="inline-log-checkpoint" class="inline-log-checkpoint" hidden>
               <strong>2FA mới đã được lưu · Verify thất bại</strong>
-              <span>Combo lỗi đang dùng secret mới. Khi Retry, tool chỉ đăng nhập xác minh lại và không đổi sang secret khác.</span>
+              <span>Combo lỗi đang dùng secret mới. Khi Retry, tool chỉ đăng nhập xác minh lại và không đổi sang secret
+                khác.</span>
             </div>
             <pre id="inline-log-content">Chọn tài khoản để xem log.</pre>
           </div>
         </div>
       </section>
 
-      <footer><span>LEHAIPRESHOP</span><i></i><span>WORKSPACE RIÊNG</span><b>@arjso1612</b></footer>
+      <footer><span>DangTuan</span><i></i><span>WORKSPACE RIÊNG</span><b>@arjso1612</b></footer>
     </main>
   </div>
 
   <div id="drawer-backdrop" class="drawer-backdrop"></div>
   <aside id="detail-drawer" class="drawer" aria-hidden="true">
     <button id="close-detail" class="drawer-close" aria-label="Đóng">×</button>
-    <span class="eyebrow">Nhật ký</span><h2 id="detail-title">Chi tiết tác vụ</h2>
-    <div id="detail-status" class="detail-status"></div><pre id="detail-logs"></pre>
+    <span class="eyebrow">Nhật ký</span>
+    <h2 id="detail-title">Chi tiết tác vụ</h2>
+    <div id="detail-status" class="detail-status"></div>
+    <pre id="detail-logs"></pre>
   </aside>
   <aside id="settings-drawer" class="drawer" aria-hidden="true">
     <button id="close-settings" class="drawer-close" aria-label="Đóng">×</button>
-    <span class="eyebrow">Thiết lập</span><h2>Cấu hình xử lý</h2>
+    <span class="eyebrow">Thiết lập</span>
+    <h2>Cấu hình xử lý</h2>
     <form id="settings-form">
       <label>Luồng đồng thời<input id="setting-concurrency" type="number" min="1" max="10"></label>
       <label>Timeout mỗi bước (giây)<input id="setting-timeout" type="number" min="30" max="600"></label>
-      <label class="switch-row"><span>Tự động thử lại</span><input id="setting-auto-retry" type="checkbox"><i></i></label>
+      <label class="switch-row"><span>Tự động thử lại</span><input id="setting-auto-retry"
+          type="checkbox"><i></i></label>
       <label>Số lần retry<input id="setting-retry-max" type="number" min="0" max="5"></label>
       <label>Độ trễ retry (giây)<input id="setting-retry-delay" type="number" min="0" max="60"></label>
       <label class="proxy-list-field" for="setting-proxy-pool">
         <span>Danh sách proxy <b id="setting-proxy-count">0 proxy</b></span>
-        <textarea id="setting-proxy-pool" wrap="off" spellcheck="false" autocomplete="off" placeholder="Mỗi dòng một proxy&#10;host:port&#10;host:port:user:pass&#10;http://user:pass@host:port"></textarea>
+        <textarea id="setting-proxy-pool" wrap="off" spellcheck="false" autocomplete="off"
+          placeholder="Mỗi dòng một proxy&#10;host:port&#10;host:port:user:pass&#10;http://user:pass@host:port"></textarea>
         <small>Proxy được gán lần lượt rồi tự quay về dòng đầu. Số luồng quyết định số tài khoản chạy đồng thời.</small>
       </label>
       <div class="proxy-test-actions">
@@ -191,14 +235,28 @@
   <dialog id="launch-confirm" class="launch-modal" aria-labelledby="confirm-title">
     <div id="confirm-accent" class="confirm-accent is-check">
       <span id="confirm-icon">✓</span>
-      <div><small>TÁC VỤ ĐÃ CHỌN</small><h2 id="confirm-title">Kiểm tra tài khoản</h2></div>
+      <div><small>TÁC VỤ ĐÃ CHỌN</small>
+        <h2 id="confirm-title">Kiểm tra tài khoản</h2>
+      </div>
     </div>
     <p id="confirm-message">Hệ thống sẽ xác định trạng thái tài khoản và giữ nguyên mật khẩu, 2FA.</p>
     <dl class="confirm-facts">
-      <div><dt>Tài khoản</dt><dd id="confirm-count">0</dd></div>
-      <div><dt>Số luồng</dt><dd id="confirm-concurrency">1</dd></div>
-      <div><dt>Kết nối</dt><dd id="confirm-proxy">DIRECT</dd></div>
-      <div><dt>Thao tác 2FA</dt><dd id="confirm-action">KHÔNG THAY ĐỔI</dd></div>
+      <div>
+        <dt>Tài khoản</dt>
+        <dd id="confirm-count">0</dd>
+      </div>
+      <div>
+        <dt>Số luồng</dt>
+        <dd id="confirm-concurrency">1</dd>
+      </div>
+      <div>
+        <dt>Kết nối</dt>
+        <dd id="confirm-proxy">DIRECT</dd>
+      </div>
+      <div>
+        <dt>Thao tác 2FA</dt>
+        <dd id="confirm-action">KHÔNG THAY ĐỔI</dd>
+      </div>
     </dl>
     <div class="confirm-actions">
       <button id="cancel-launch" class="button ghost" type="button">Quay lại</button>
@@ -209,4 +267,5 @@
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
   <script src="/assets/app.js" defer></script>
 </body>
+
 </html>
