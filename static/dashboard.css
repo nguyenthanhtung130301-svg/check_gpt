@@ -1554,6 +1554,167 @@ pre {
   border-color: var(--accent);
 }
 
+.drawer select,
+.setting-select {
+  width: 100%;
+  height: 42px;
+  padding: 0 34px 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: 0;
+  background-color: #12100d;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23e8ad51' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 12px center;
+  background-size: 14px;
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 0.78rem;
+  font-weight: 500;
+  appearance: none;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  cursor: pointer;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.drawer select:hover,
+.setting-select:hover {
+  border-color: var(--line-strong);
+}
+
+.drawer select:focus,
+.setting-select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(232, 173, 81, 0.15);
+}
+
+.drawer select option,
+.setting-select option {
+  background-color: #161a14;
+  color: var(--text);
+  padding: 10px;
+}
+
+/* Card Panel: Gán Proxy Cố Định Theo Luồng */
+.proxy-worker-bindings {
+  margin-top: 4px;
+  padding: 14px;
+  background: #0f130e;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 11px;
+}
+
+.proxy-worker-bindings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.bindings-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.68rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.bindings-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 9px;
+  border-radius: 20px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  background: rgba(104, 210, 173, 0.12);
+  color: var(--success);
+  border: 1px solid rgba(104, 210, 173, 0.25);
+  letter-spacing: 0.03em;
+}
+
+.proxy-worker-bindings-grid {
+  display: grid;
+  gap: 8px;
+}
+
+.worker-binding-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: #141812;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px 6px 10px;
+  transition: border-color 0.18s, background 0.18s;
+}
+
+.worker-binding-row:hover {
+  border-color: var(--line-strong);
+  background: #171c14;
+}
+
+.worker-slot-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 74px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  background: rgba(232, 173, 81, 0.08);
+  color: var(--accent);
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  border: 1px solid rgba(232, 173, 81, 0.25);
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.worker-binding-select {
+  flex: 1;
+  min-width: 0;
+  height: 34px !important;
+  padding: 0 28px 0 10px !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 6px !important;
+  background-color: #0e110c !important;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23e8ad51' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E") !important;
+  background-repeat: no-repeat !important;
+  background-position: right 8px center !important;
+  background-size: 12px !important;
+  color: var(--text) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 0.72rem !important;
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  outline: 0 !important;
+  cursor: pointer !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.worker-binding-select:focus {
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 2px rgba(232, 173, 81, 0.15) !important;
+}
+
+.worker-binding-select option {
+  background-color: #161a14 !important;
+  color: var(--text) !important;
+  padding: 8px !important;
+  font-family: var(--font-mono) !important;
+}
+
 .proxy-list-field > span {
   display: flex;
   align-items: center;
@@ -2848,5 +3009,3 @@ footer b {
     max-width: 85px !important;
   }
 }
-
-

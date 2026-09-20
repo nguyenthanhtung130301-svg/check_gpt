@@ -12,8 +12,8 @@
   <link
     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;500;600;700;800&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="/assets/index.css?v=19">
-  <link rel="stylesheet" href="/assets/dashboard.css?v=19">
+  <link rel="stylesheet" href="/assets/index.css?v=21">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=21">
 </head>
 
 <body>
@@ -236,12 +236,29 @@
           type="checkbox"><i></i></label>
       <label>Số lần retry<input id="setting-retry-max" type="number" min="0" max="5"></label>
       <label>Độ trễ retry (giây)<input id="setting-retry-delay" type="number" min="0" max="60"></label>
+      <label for="setting-proxy-mode">
+        <span>Chế độ chạy Proxy</span>
+        <select id="setting-proxy-mode" class="setting-select">
+          <option value="random_per_account">🎲 Ngẫu nhiên sau mỗi lần check (Tự đổi IP)</option>
+          <option value="manual_per_worker">📌 Cố định proxy theo từng luồng</option>
+        </select>
+        <small id="proxy-mode-help" style="color:#7694a7;font-size:10px;margin-top:2px;">
+          Worker tự đổi sang proxy ngẫu nhiên khi sang tài khoản mới (tránh bị OpenAI rate-limit).
+        </small>
+      </label>
       <label class="proxy-list-field" for="setting-proxy-pool">
         <span>Danh sách proxy <b id="setting-proxy-count">0 proxy</b></span>
         <textarea id="setting-proxy-pool" wrap="off" spellcheck="false" autocomplete="off"
           placeholder="Mỗi dòng một proxy&#10;host:port&#10;host:port:user:pass&#10;http://user:pass@host:port"></textarea>
-        <small>Proxy được gán lần lượt rồi tự quay về dòng đầu. Số luồng quyết định số tài khoản chạy đồng thời.</small>
+        <small>Mỗi dòng 1 proxy. Để trống sẽ chạy DIRECT (IP mạng hiện tại).</small>
       </label>
+      <div id="proxy-worker-bindings-container" class="proxy-worker-bindings" hidden>
+        <div class="proxy-worker-bindings-header">
+          <span class="bindings-title">📌 Phân bổ proxy theo luồng</span>
+          <span id="bindings-status-text" class="bindings-pill">0/0 luồng</span>
+        </div>
+        <div id="proxy-worker-bindings-list" class="proxy-worker-bindings-grid"></div>
+      </div>
       <div class="proxy-test-actions">
         <button id="test-proxies" class="button proxy-test-button" type="button">
           <i aria-hidden="true"></i><span id="test-proxies-label">Kiểm tra proxy</span>
@@ -424,7 +441,7 @@
   </dialog>
 
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
-  <script src="/assets/app.js?v=19" defer></script>
+  <script src="/assets/app.js?v=21" defer></script>
 </body>
 
 </html>

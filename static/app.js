@@ -202,11 +202,114 @@
       .filter(Boolean);
   }
 
+  function proxyBindings() {
+    return (state.settings && typeof state.settings['twofa.proxy_bindings'] === 'object')
+      ? state.settings['twofa.proxy_bindings']
+      : {};
+  }
+
   function updateProxySummary() {
     const savedCount = proxyPool().length;
     const inputCount = proxyInputLines().length;
-    $('proxy-summary').textContent = savedCount ? `${savedCount} PROXY` : 'DIRECT';
+    const mode = state.settings?.['twofa.proxy_mode'] || 'random_per_account';
+    const modeLabel = mode === 'manual_per_worker' ? 'CỐ ĐỊNH' : 'RANDOM';
+    $('proxy-summary').textContent = savedCount ? `${savedCount} PROXY · ${modeLabel}` : 'DIRECT';
     $('setting-proxy-count').textContent = `${inputCount} proxy`;
+  }
+
+  function renderWorkerProxyBindings() {
+    const modeSel = $('setting-proxy-mode');
+    const mode = modeSel ? modeSel.value : 'random_per_account';
+    const container = $('proxy-worker-bindings-container');
+    const list = $('proxy-worker-bindings-list');
+    const help = $('proxy-mode-help');
+    const statusText = $('bindings-status-text');
+    if (!container || !list) return;
+
+    if (mode === 'random_per_account') {
+      container.hidden = true;
+      if (help) help.textContent = 'Worker tự động đổi sang proxy rảnh ngẫu nhiên khi sang tài khoản mới (tránh bị OpenAI rate-limit).';
+      return;
+    }
+
+    container.hidden = false;
+    if (help) help.textContent = 'Mỗi Luồng (Worker) được gán cố định 1 proxy duy nhất trong suốt quá trình chạy.';
+
+    const concurrency = Number($('setting-concurrency').value) || 1;
+    const lines = proxyInputLines();
+    const currentBindings = proxyBindings();
+
+    if (!lines.length) {
+      list.innerHTML = '<div style="color:var(--danger);font-size:0.72rem;padding:8px 4px;font-family:var(--font-mono);">⚠️ Vui lòng dán danh sách proxy vào ô bên trên trước khi phân bổ luồng.</div>';
+      if (statusText) statusText.textContent = '0 proxy';
+      return;
+    }
+
+    // Helper rút gọn hiển thị host:port sạch đẹp
+    const cleanProxyLabel = (raw) => {
+      try {
+        let text = raw.trim();
+        if (text.includes('://')) {
+          text = text.split('://')[1];
+        }
+        if (text.includes('@')) {
+          text = text.split('@')[1];
+        } else {
+          const parts = text.split(':');
+          if (parts.length >= 2) {
+            text = `${parts[0]}:${parts[1]}`;
+          }
+        }
+        return text;
+      } catch (_) {
+        return raw.slice(0, 24);
+      }
+    };
+
+    let boundCount = 0;
+    let html = '';
+    for (let slot = 1; slot <= concurrency; slot++) {
+      const boundVal = currentBindings[String(slot)] || currentBindings[slot] || slot;
+      const options = lines.map((line, idx) => {
+        const slotIdx = idx + 1;
+        const isSelected = String(boundVal) === String(slotIdx) || boundVal === line;
+        if (isSelected) boundCount++;
+        const safeHostPort = cleanProxyLabel(line);
+        return `<option value="${slotIdx}" ${isSelected ? 'selected' : ''}>Proxy #${slotIdx} · ${escapeHtml(safeHostPort)}</option>`;
+      }).join('');
+
+      html += `
+        <div class="worker-binding-row">
+          <span class="worker-slot-badge">Luồng #${slot}</span>
+          <select class="worker-binding-select" data-slot="${slot}">
+            ${options}
+          </select>
+        </div>
+      `;
+    }
+    list.innerHTML = html;
+    if (statusText) {
+      statusText.textContent = `${Math.min(boundCount, concurrency)}/${concurrency} luồng đã gán`;
+    }
+
+    // Lắng nghe thay đổi chọn proxy của từng luồng
+    list.querySelectorAll('.worker-binding-select').forEach((sel) => {
+      sel.addEventListener('change', () => {
+        if (statusText) {
+          statusText.textContent = `${concurrency}/${concurrency} luồng đã gán`;
+        }
+      });
+    });
+  }
+
+  function collectWorkerBindings() {
+    const bindings = {};
+    const selects = document.querySelectorAll('.worker-binding-select');
+    selects.forEach((sel) => {
+      const slot = sel.dataset.slot;
+      if (slot) bindings[slot] = Number(sel.value) || sel.value;
+    });
+    return bindings;
   }
 
   function resetProxyTest() {
@@ -335,7 +438,7 @@
       const canStop = ['queued', 'running'].includes(job.status);
       const selected = state.selectedJob === job.id ? ' selected' : '';
       return `<tr data-id="${job.id}" class="job-row${verifyFailed ? ' verify-failed-row' : ''}${selected}" title="${escapeHtml(job.error || '')}">
-        <td class="account"><strong>${escapeHtml(job.email)}</strong><span>${job.id.slice(0, 10).toUpperCase()} · <b class="job-mode mode-${job.mode}">${escapeHtml(modeShort)}</b></span>${job.has_proxy ? `<small class="proxy-assignment">PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</small>` : ''}</td>
+        <td class="account"><strong>${escapeHtml(job.email)}</strong><span>${job.id.slice(0, 10).toUpperCase()} · <b class="job-mode mode-${job.mode}">${escapeHtml(modeShort)}</b></span>${job.has_proxy ? `<small class="proxy-assignment">${job.worker_slot ? `Luồng #${job.worker_slot} · ` : ''}PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</small>` : ''}</td>
         <td><span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''} ${job.plan ? `plan-${escapeHtml(job.plan)}` : ''}">${escapeHtml(statusLabel(job))}</span></td>
         <td>${formatStartTime(job.started_at)}</td>
         <td><div class="account-result"><span class="account-badge ${check.className} ${job.plan ? `plan-${escapeHtml(job.plan)}` : ''}">${escapeHtml(check.label)}</span>${planExpiry ? `<small class="plan-expiry">${escapeHtml(planExpiry)}</small>` : ''}<small>${escapeHtml(checkpoint)}</small></div></td>
@@ -433,9 +536,19 @@
     $('confirm-message').textContent = info.description;
     $('confirm-count').textContent = lines.length;
     $('confirm-concurrency').textContent = $('quick-concurrency').value;
-    $('confirm-proxy').textContent = (state.user?.role === 'admin' && proxies.length)
-      ? `${proxies.length} PROXY XOAY VÒNG`
-      : 'HỆ THỐNG GÁN TỰ ĐỘNG';
+    const proxyCount = proxies.length;
+    const pMode = state.settings?.['twofa.proxy_mode'] || 'random_per_account';
+    let proxyConfirmText = 'DIRECT';
+    if (state.user?.role === 'admin' && proxyCount) {
+      if (pMode === 'manual_per_worker') {
+        proxyConfirmText = `CỐ ĐỊNH · ${$('quick-concurrency').value} luồng`;
+      } else {
+        proxyConfirmText = `RANDOM · ${proxyCount} proxy`;
+      }
+    } else if (proxyCount) {
+      proxyConfirmText = 'HỆ THỐNG GÁN TỰ ĐỘNG';
+    }
+    $('confirm-proxy').textContent = proxyConfirmText;
     $('confirm-action').textContent = info.short;
     $('confirm-launch').className = `button ${isDestructive ? 'confirm-change' : 'confirm-check'}`;
     $('confirm-launch').textContent = isDestructive ? `Xác nhận — ${info.title}` : 'Đúng, chỉ kiểm tra';
@@ -479,7 +592,10 @@
     const timeChip = job.started_at
       ? `<span class="proxy-chip time-chip" title="Thời gian bắt đầu">⏱ ${new Date(job.started_at * 1000).toLocaleTimeString('vi-VN')}</span>`
       : '';
-    $('inline-log-status').innerHTML = `<span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(job))}</span>${timeChip}${job.has_proxy ? `<span class="proxy-chip">PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</span>` : '<span class="proxy-chip direct">DIRECT</span>'}`;
+    const proxyChip = job.has_proxy
+      ? `<span class="proxy-chip">${job.worker_slot ? `Luồng #${job.worker_slot} · ` : ''}PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}${job.proxy_mode === 'manual_per_worker' ? ' [CỐ ĐỊNH]' : ''}</span>`
+      : '<span class="proxy-chip direct">DIRECT</span>';
+    $('inline-log-status').innerHTML = `<span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(job))}</span>${timeChip}${proxyChip}`;
     const stopBtn = $('btn-stop-inline-job');
     if (stopBtn) {
       stopBtn.hidden = !['queued', 'running'].includes(job.status);
@@ -573,6 +689,10 @@
     $('setting-retry-max').value = state.settings['twofa.auto_retry_max'] ?? 2;
     $('setting-retry-delay').value = state.settings['twofa.auto_retry_delay'] ?? 5;
     $('setting-proxy-pool').value = proxyPool().join('\n');
+    if ($('setting-proxy-mode')) {
+      $('setting-proxy-mode').value = state.settings['twofa.proxy_mode'] || 'random_per_account';
+    }
+    renderWorkerProxyBindings();
     updateProxySummary();
     resetProxyTest();
     renderMode();
@@ -588,6 +708,8 @@
       change_enabled: Boolean(state.settings['twofa.change_enabled']),
       input_draft: '',
       proxy_pool: proxyPool(),
+      proxy_mode: state.settings['twofa.proxy_mode'] || 'random_per_account',
+      proxy_bindings: state.settings['twofa.proxy_bindings'] || {},
     };
   }
 
@@ -635,6 +757,8 @@
       return toast('Chỉ Quản trị viên mới được sửa thiết lập', 'error');
     }
     try {
+      const mode = $('setting-proxy-mode')?.value || 'random_per_account';
+      const bindings = mode === 'manual_per_worker' ? collectWorkerBindings() : (state.settings['twofa.proxy_bindings'] || {});
       const payload = {
         max_concurrent: Number($('setting-concurrency').value),
         job_timeout: Number($('setting-timeout').value),
@@ -644,12 +768,14 @@
         change_enabled: Boolean(state.settings['twofa.change_enabled']),
         input_draft: '',
         proxy_pool: proxyInputLines(),
+        proxy_mode: mode,
+        proxy_bindings: bindings,
       };
       const data = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
       state.settings = data.settings;
       loadSettingsForm();
       closeDrawers();
-      toast('Đã lưu cấu hình runtime vào SQLite.');
+      toast('Đã lưu cấu hình proxy và luồng runtime vào SQLite.');
     } catch (error) { toast(error.message, 'error'); }
   }
 
@@ -1066,7 +1192,18 @@
   $('quick-concurrency').addEventListener('change', async () => {
     try { await saveQuickConcurrency(); } catch (error) { toast(error.message, 'error'); }
   });
-  $('setting-proxy-pool').addEventListener('input', () => { updateProxySummary(); resetProxyTest(); });
+  $('setting-proxy-pool').addEventListener('input', () => {
+    renderWorkerProxyBindings();
+    updateProxySummary();
+    resetProxyTest();
+  });
+  $('setting-proxy-mode')?.addEventListener('change', () => {
+    renderWorkerProxyBindings();
+    updateProxySummary();
+  });
+  $('setting-concurrency')?.addEventListener('input', () => {
+    renderWorkerProxyBindings();
+  });
   $('test-proxies').addEventListener('click', testProxies);
   $('launch-batch').addEventListener('click', async () => {
     try {
@@ -1094,7 +1231,10 @@
     if (updatedJob && $('btn-stop-inline-job')) {
       $('btn-stop-inline-job').hidden = !['queued', 'running'].includes(updatedJob.status);
       const verifyFailed = isVerifyFailure(updatedJob);
-      $('inline-log-status').innerHTML = `<span class="status ${updatedJob.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(updatedJob))}</span>${updatedJob.has_proxy ? `<span class="proxy-chip">PROXY #${updatedJob.proxy_slot} · ${escapeHtml(updatedJob.proxy_label)}</span>` : '<span class="proxy-chip direct">DIRECT</span>'}`;
+      const proxyChip = updatedJob.has_proxy
+        ? `<span class="proxy-chip">${updatedJob.worker_slot ? `Luồng #${updatedJob.worker_slot} · ` : ''}PROXY #${updatedJob.proxy_slot} · ${escapeHtml(updatedJob.proxy_label)}${updatedJob.proxy_mode === 'manual_per_worker' ? ' [CỐ ĐỊNH]' : ''}</span>`
+        : '<span class="proxy-chip direct">DIRECT</span>';
+      $('inline-log-status').innerHTML = `<span class="status ${updatedJob.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(updatedJob))}</span>${proxyChip}`;
     }
   });
   document.querySelectorAll('.filter').forEach((button) => button.addEventListener('click', () => {

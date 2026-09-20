@@ -141,6 +141,8 @@ class SettingsRequest(BaseModel):
     change_enabled: bool
     input_draft: str = Field(default="", max_length=1_000_000)
     proxy_pool: list[str] = Field(default_factory=list, max_length=500)
+    proxy_mode: str = Field(default="random_per_account", pattern="^(random_per_account|manual_per_worker)$")
+    proxy_bindings: dict[str, Any] = Field(default_factory=dict)
 
 
 class ProxyTestRequest(BaseModel):
@@ -479,9 +481,14 @@ async def update_settings(request: SettingsRequest) -> dict[str, Any]:
             "twofa.change_enabled": request.change_enabled,
             "twofa.input_draft": "",  # Không lưu input draft để đảm bảo an toàn thông tin
             "twofa.proxy_pool": request.proxy_pool,
+            "twofa.proxy_mode": request.proxy_mode,
+            "twofa.proxy_bindings": request.proxy_bindings,
         })}
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        msg = str(exc)
+        if "đang có tác vụ" in msg or "xung đột" in msg:
+            raise HTTPException(status_code=409, detail=msg) from exc
+        raise HTTPException(status_code=422, detail=msg) from exc
 
 
 @app.get("/api/events")
