@@ -424,7 +424,7 @@ async def delete_job(
 
 @app.post("/api/jobs/stop-all", dependencies=[Depends(require_csrf)])
 async def stop_all(actor: AuthContext = Depends(get_current_user)) -> dict[str, bool]:
-    manager.stop_all(actor=actor)
+    await manager.stop_all(actor=actor)
     return {"ok": True}
 
 
