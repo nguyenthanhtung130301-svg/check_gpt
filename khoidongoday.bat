@@ -70,7 +70,8 @@ powershell -NoProfile -Command ^
 if not errorlevel 1 goto open_tool
 
 pushd "%ROOT_DIR%"
-start "" /b "%PYTHONW%" "%APP_DIR%server.py" --host 127.0.0.1 --port 5033 --no-browser >nul 2>&1
+if not exist "%ROOT_DIR%\runtime" mkdir "%ROOT_DIR%\runtime"
+start "" /b "%PYTHONW%" "%APP_DIR%server.py" --host 127.0.0.1 --port 5033 --no-browser > "%ROOT_DIR%\runtime\server.log" 2>&1
 popd
 
 powershell -NoProfile -WindowStyle Hidden -Command ^

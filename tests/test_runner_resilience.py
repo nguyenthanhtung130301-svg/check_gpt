@@ -267,6 +267,49 @@ class RunnerResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(output_lines), 1)
         self.assertEqual(output_lines[0], "liveuser@example.com|mypass|LIVE_SECRET")
 
+    async def test_check_only_keeps_selected_proxy_and_does_not_call_change_flows(self):
+        proxy = "http://127.0.0.1:8080"
+        settings = FakeSettingsRepository({
+            "twofa.max_concurrent": 1,
+            "twofa.job_timeout": 5.0,
+            "twofa.proxy_pool": [proxy],
+            "twofa.proxy_strategy": "random",
+        })
+        job_repo = FakeJobRepository()
+        manager = TwoFAJobManager(job_repo, settings)
+        admin = make_auth(1, "admin", "admin")
+        seen_proxies = []
+
+        async def mock_check(*args, **kwargs):
+            seen_proxies.append(kwargs["proxy"])
+            return RotationResult(
+                secret="LIVE_SECRET",
+                login_verified=True,
+                account_state="live",
+            )
+
+        manager.service.check = mock_check
+        manager.service.rotate = AsyncMock()
+        manager.service.change_password = AsyncMock()
+        manager.service.rotate_with_password = AsyncMock()
+        manager.service.verify = AsyncMock()
+
+        created = manager.add(
+            ["liveproxy@example.com|mypass|LIVE_SECRET"],
+            mode="check_only",
+            actor=admin,
+        )
+        job = manager.jobs[created[0]["id"]]
+        await manager._run(job)
+
+        self.assertEqual(job.status, "success")
+        self.assertEqual(job.proxy, proxy)
+        self.assertEqual(seen_proxies, [proxy])
+        manager.service.rotate.assert_not_awaited()
+        manager.service.change_password.assert_not_awaited()
+        manager.service.rotate_with_password.assert_not_awaited()
+        manager.service.verify.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

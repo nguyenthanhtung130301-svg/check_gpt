@@ -185,6 +185,15 @@ class UserRepository:
                 (user_id,),
             )
 
+    def delete_user(self, user_id: int) -> bool:
+        """Xóa tài khoản collaborator khỏi hệ thống, tuyệt đối không tác động admin."""
+        with self._engine.get_connection() as conn:
+            cur = conn.execute(
+                "DELETE FROM users WHERE id = ? AND role = 'collaborator'",
+                (user_id,),
+            )
+            return cur.rowcount > 0
+
 
 class SessionRepository:
     def __init__(self, engine) -> None:

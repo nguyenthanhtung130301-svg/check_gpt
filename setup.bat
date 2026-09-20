@@ -73,23 +73,27 @@ if errorlevel 1 (
     echo [ERROR] Camoufox catalog sync that bai.
     exit /b 1
 )
+"%PYTHON%" -m camoufox fetch "%CAMOUFOX_BROWSER_SPEC%"
+if errorlevel 1 (
+    echo [ERROR] Tai Camoufox that bai. Kiem tra Internet roi thu lai.
+    exit /b 1
+)
 "%PYTHON%" -m camoufox set "%CAMOUFOX_BROWSER_SPEC%"
 if errorlevel 1 (
     echo [ERROR] Khong the chon Camoufox %CAMOUFOX_BROWSER_SPEC%.
     exit /b 1
 )
-"%PYTHON%" -m camoufox fetch
-if errorlevel 1 (
-    echo [ERROR] Tai Camoufox that bai. Kiem tra Internet roi thu lai.
-    exit /b 1
-)
 
 echo [5/5] Dang kiem tra Camoufox...
 "%PYTHON%" "scripts\verify_camoufox_install.py" --spec-file "camoufox-browser-spec.txt"
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+    if not defined APP_DIR pause
+    exit /b 1
+)
 
 > ".setup-complete" echo Lehaipreshop setup completed
 
 echo.
 echo [OK] Cai dat hoan tat. Dashboard se tu mo.
+if not defined APP_DIR pause
 exit /b 0

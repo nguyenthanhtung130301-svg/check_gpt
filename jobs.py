@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -115,6 +116,8 @@ class TwoFAJob:
     secret: str
     proxy: str | None = None
     proxy_slot: int | None = None
+    proxy_mode: str = "random_per_account"
+    worker_slot: int | None = None
     last_failed_proxy: str | None = None
     mode: str = "change_2fa"
     status: str = "queued"
@@ -151,6 +154,8 @@ class TwoFAJob:
             "has_proxy": bool(self.proxy),
             "proxy_label": proxy_label(self.proxy),
             "proxy_slot": self.proxy_slot,
+            "proxy_mode": self.proxy_mode,
+            "worker_slot": self.worker_slot,
             "mode": self.mode,
             "status": self.status,
             "error": self.error,
@@ -193,6 +198,8 @@ class TwoFAJobManager:
         "twofa.change_enabled": False,
         "twofa.input_draft": "",
         "twofa.proxy_pool": [],
+        "twofa.proxy_mode": "random_per_account",
+        "twofa.proxy_bindings": {},
     }
 
     def __init__(self, job_repo, settings_repo, service: TwoFAService | None = None, user_repo: Any = None) -> None:
@@ -261,6 +268,8 @@ class TwoFAJobManager:
                 secret=str(row.get("secret") or ""),
                 proxy=str(state.get("proxy") or "") or None,
                 proxy_slot=int(state["proxy_slot"]) if state.get("proxy_slot") else None,
+                proxy_mode=str(state.get("proxy_mode") or "random_per_account"),
+                worker_slot=int(state["worker_slot"]) if state.get("worker_slot") else None,
                 last_failed_proxy=str(state.get("last_failed_proxy") or "") or None,
                 mode=str(state.get("mode") or "change_2fa"),
                 status=status,
@@ -311,6 +320,8 @@ class TwoFAJobManager:
             "new_password": job.new_password,
             "proxy": job.proxy,
             "proxy_slot": job.proxy_slot,
+            "proxy_mode": job.proxy_mode,
+            "worker_slot": job.worker_slot,
             "last_failed_proxy": job.last_failed_proxy,
         }, ensure_ascii=False)
 
@@ -333,8 +344,8 @@ class TwoFAJobManager:
 
     def _spawn_workers(self, target: int) -> None:
         workers = self._active_workers()
-        while len(workers) < target:
-            task = asyncio.create_task(self._worker())
+        for slot in range(len(workers) + 1, target + 1):
+            task = asyncio.create_task(self._worker(slot))
             workers.append(task)
 
     async def _claim_retirement(self) -> bool:
@@ -386,6 +397,7 @@ class TwoFAJobManager:
             parsed_lines.append((email, password, secret))
 
         proxies = normalize_proxy_pool(self.settings.get("twofa.proxy_pool") or [])
+        proxy_mode = str(self.settings.get("twofa.proxy_mode") or "random_per_account")
 
         created: list[dict[str, Any]] = []
         for index, (email, password, secret) in enumerate(parsed_lines):
@@ -401,6 +413,7 @@ class TwoFAJobManager:
                 secret=secret,
                 proxy=assigned_proxy,
                 proxy_slot=proxy_slot,
+                proxy_mode=proxy_mode,
                 mode=mode,
                 owner_user_id=owner_uid,
             )
@@ -458,7 +471,8 @@ class TwoFAJobManager:
 
             return None, None
 
-    async def _worker(self) -> None:
+    async def _worker(self, slot_id: int) -> None:
+        last_proxy: str | None = None
         while True:
             job_id, uid = await self._pick_next_job_id()
             if not job_id:
@@ -469,9 +483,11 @@ class TwoFAJobManager:
             if job and job.status == "queued":
                 self._running_by_user[uid] += 1
                 try:
-                    task = asyncio.create_task(self._run(job))
+                    task = asyncio.create_task(self._run(job, slot_id=slot_id, last_proxy=last_proxy))
                     self._tasks[job.id] = task
                     await task
+                    if job.proxy:
+                        last_proxy = job.proxy
                 except asyncio.CancelledError:
                     # Truyền tiếp CancelledError để shutdown và resize worker hoạt động đúng
                     raise
@@ -496,7 +512,9 @@ class TwoFAJobManager:
         job.error_kind = str(getattr(exc, "error_kind", "technical_error"))
         job.account_state = str(getattr(exc, "account_state", job.account_state))
         job.finished_at = time.time()
-        if job.proxy and job.retryable:
+        # Chỉ phạt cooldown proxy khi gặp lỗi kỹ thuật (technical_error)
+        # Lỗi tài khoản (account_die, invalid_credentials) KHÔNG phạt proxy
+        if job.proxy and job.retryable and job.error_kind == "technical_error":
             job.last_failed_proxy = job.proxy
             self._mark_proxy_failed(job.proxy)
 
@@ -569,31 +587,86 @@ class TwoFAJobManager:
                 return index + 1, proxy
         return None
 
-    async def _prepare_proxy(self, job: TwoFAJob, log_fn: Callable[[str], None] | None = None) -> None:
+    async def _prepare_proxy(
+        self,
+        job: TwoFAJob,
+        slot_id: int,
+        last_proxy: str | None = None,
+        log_fn: Callable[[str], None] | None = None,
+    ) -> None:
         start_time = time.time()
         notified_waiting = False
+        mode = str(self.settings.get("twofa.proxy_mode") or "random_per_account")
+        job.proxy_mode = mode
+        job.worker_slot = slot_id
+
         while True:
             proxies = normalize_proxy_pool(self.settings.get("twofa.proxy_pool") or [])
             if not proxies:
                 job.proxy = None
                 job.proxy_slot = None
                 return
-            selected = self._pick_available_proxy(job, proxies)
-            if selected:
-                job.proxy_slot, job.proxy = selected
-                return
 
-            if not notified_waiting and log_fn:
-                log_fn(f"[chờ proxy] Tất cả proxy ({len(proxies)}) đang bận hoặc tạm nghỉ, đang đợi proxy rảnh...")
-                notified_waiting = True
+            active = {
+                item.proxy for item in self.jobs.values()
+                if item.id != job.id and item.status == "running" and item.proxy
+            }
+            cooldowns = self._active_proxy_cooldowns()
+
+            if mode == "manual_per_worker":
+                bindings = self.settings.get("twofa.proxy_bindings") or {}
+                raw_binding = bindings.get(str(slot_id))
+                if raw_binding is None:
+                    raise ValueError(f"Luồng #{slot_id} chưa được gán proxy cố định trong Cài đặt")
+
+                target_proxy = None
+                target_idx = None
+                if isinstance(raw_binding, int) or (isinstance(raw_binding, str) and raw_binding.isdigit()):
+                    idx = int(raw_binding) - 1
+                    if 0 <= idx < len(proxies):
+                        target_idx = idx + 1
+                        target_proxy = proxies[idx]
+                elif isinstance(raw_binding, str):
+                    for i, p in enumerate(proxies):
+                        if p == raw_binding or raw_binding in p:
+                            target_idx = i + 1
+                            target_proxy = p
+                            break
+                if not target_proxy:
+                    raise ValueError(f"Proxy đã gán cho Luồng #{slot_id} không tồn tại trong danh sách proxy")
+
+                if target_proxy in active or target_proxy in cooldowns:
+                    if not notified_waiting and log_fn:
+                        log_fn(f"[chờ proxy] Luồng #{slot_id} đang chờ proxy đã gán (Proxy #{target_idx}) rảnh...")
+                        notified_waiting = True
+                else:
+                    job.proxy = target_proxy
+                    job.proxy_slot = target_idx
+                    return
+
+            else:  # random_per_account
+                blocked = active | cooldowns
+                candidates = [p for p in proxies if p not in blocked]
+                if candidates:
+                    if len(candidates) >= 2 and last_proxy in candidates:
+                        chosen = random.choice([p for p in candidates if p != last_proxy])
+                    else:
+                        chosen = random.choice(candidates)
+                    job.proxy = chosen
+                    job.proxy_slot = proxies.index(chosen) + 1
+                    return
+                else:
+                    if not notified_waiting and log_fn:
+                        log_fn(f"[chờ proxy] Luồng #{slot_id} đang chờ proxy ngẫu nhiên rảnh...")
+                        notified_waiting = True
 
             if time.time() - start_time > PROXY_WAIT_TIMEOUT:
                 raise TimeoutError(
-                    f"Hết thời gian chờ proxy khả dụng ({int(PROXY_WAIT_TIMEOUT)}s) — tất cả proxy trong pool đều bận hoặc tạm nghỉ"
+                    f"Hết thời gian chờ proxy khả dụng ({int(PROXY_WAIT_TIMEOUT)}s) — tất cả proxy đều bận hoặc tạm nghỉ"
                 )
             await asyncio.sleep(0.5)
 
-    async def _run(self, job: TwoFAJob) -> None:
+    async def _run(self, job: TwoFAJob, slot_id: int = 1, last_proxy: str | None = None) -> None:
         # Chuyển trạng thái running ngay khi bắt đầu và broadcast tức thì về giao diện
         job.status = "running"
         job.error = None
@@ -667,16 +740,16 @@ class TwoFAJobManager:
 
         try:
             # 1. Chuẩn bị proxy với timeout và log chờ
-            await self._prepare_proxy(job, log_fn=log)
+            await self._prepare_proxy(job, slot_id=slot_id, last_proxy=last_proxy, log_fn=log)
 
             timeout = float(self.settings.get("twofa.job_timeout") or 180.0)
             if job.proxy:
                 log(
-                    f"[proxy] Proxy #{job.proxy_slot or 1} · {proxy_label(job.proxy)} "
-                    "· gán theo vòng xoay proxy"
+                    f"[proxy] Luồng #{slot_id} · Proxy #{job.proxy_slot or 1} · {proxy_label(job.proxy)} "
+                    f"· {job.proxy_mode.upper()}"
                 )
             else:
-                log("[proxy] DIRECT · chưa cấu hình proxy cho tài khoản này")
+                log(f"[proxy] Luồng #{slot_id} · DIRECT · chưa cấu hình proxy cho tài khoản này")
 
             # 2. Quyết định flow dựa trên mode và checkpoint state
             if job.mode == "check_only":
@@ -980,6 +1053,11 @@ class TwoFAJobManager:
         return list(self._require_access(job_id, actor).logs)
 
     async def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
+        active_jobs = [j for j in self.jobs.values() if j.status in ("queued", "running")]
+        routing_keys = {"twofa.max_concurrent", "twofa.proxy_pool", "twofa.proxy_mode", "twofa.proxy_bindings"}
+        if active_jobs and any(k in values and values[k] != self.settings.get(k) for k in routing_keys):
+            raise ValueError("Không thể thay đổi cấu hình proxy hoặc số luồng khi đang có tác vụ chạy hoặc chờ. Vui lòng hoàn tất hoặc dừng batch trước.")
+
         previous = int(self.settings["twofa.max_concurrent"])
         for key, value in values.items():
             if key not in self.DEFAULTS:

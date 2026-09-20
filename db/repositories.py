@@ -97,6 +97,7 @@ _EXACT_KEYS: frozenset[str] = frozenset([
     "twofa.max_concurrent", "twofa.job_timeout", "twofa.auto_retry",
     "twofa.auto_retry_max", "twofa.auto_retry_delay",
     "twofa.change_enabled", "twofa.input_draft", "twofa.proxy_pool",
+    "twofa.proxy_mode", "twofa.proxy_bindings",
     "telegram.bot_token", "telegram.chat_id",
     "ui.active_tab", "ui.link_mode",
     "web.auth_token",
@@ -112,7 +113,7 @@ _SENSITIVE_KEYS: frozenset[str] = frozenset([
     "mail_mode.custom_domain_config",
     "readmail.worker_config", "readmail.mailboxes", "readmail.alias_accounts",
     "telegram.bot_token",
-    "web.auth_token", "twofa.input_draft", "twofa.proxy_pool",
+    "web.auth_token", "twofa.input_draft", "twofa.proxy_pool", "twofa.proxy_bindings",
 ])
 
 
@@ -393,6 +394,21 @@ def _validate_type_constraint(key: str, value: Any) -> None:
                         f"{key}[{idx}]: max {_GCASH_PROXY_POOL_MAX_LINE_LEN} chars"
                     )
                 )
+        return
+
+    if key == "twofa.proxy_mode":
+        allowed_proxy_modes = ("random_per_account", "manual_per_worker")
+        if not isinstance(value, str) or value not in allowed_proxy_modes:
+            raise RepositoryError(
+                "set", ValueError(f"{key}: must be one of {allowed_proxy_modes}, got {value!r}")
+            )
+        return
+
+    if key == "twofa.proxy_bindings":
+        if not isinstance(value, dict):
+            raise RepositoryError(
+                "set", TypeError(f"{key}: must be dict, got {type(value).__name__}")
+            )
         return
 
     # --- proxy namespace ---
