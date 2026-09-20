@@ -225,6 +225,13 @@ def health() -> dict[str, Any]:
     return {"ok": True, "port": RUNTIME_PORT}
 
 
+@app.api_route("/actuator/health", methods=["GET", "HEAD"])
+@app.api_route("/actuator/health/", methods=["GET", "HEAD"])
+def actuator_health() -> dict[str, Any]:
+    """Endpoint sức khỏe công khai chuẩn Spring Boot Actuator phục vụ Render và Uptime monitoring."""
+    return {"status": "UP"}
+
+
 def _test_proxy_sync(index: int, raw_proxy: str, timeout: float = 12.0) -> dict[str, Any]:
     from curl_cffi import requests as curl_requests
     from user_agent_profile import CURL_IMPERSONATE_PRIMARY
