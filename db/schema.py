@@ -1,7 +1,9 @@
 """Schema definitions — DDL strings và version management cho SQLite persistence layer."""
 
+from auth.schema import DDL_AUTH_AUDIT_LOG, DDL_USER_SESSIONS, DDL_USERS
+
 # Schema version hiện tại. Tăng khi có thay đổi DDL.
-CURRENT_VERSION = 13
+CURRENT_VERSION = 14
 
 # --- DDL: Schema version tracking ---
 
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     account_check TEXT,
     region TEXT,
     mail_account_id TEXT,
+    owner_user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT,
     created_at REAL NOT NULL,
     started_at REAL,
     finished_at REAL,
@@ -61,6 +64,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 DDL_JOBS_INDEXES = """\
 CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status);
 CREATE INDEX IF NOT EXISTS idx_jobs_email ON jobs(email);
+CREATE INDEX IF NOT EXISTS idx_jobs_owner_user_id ON jobs(owner_user_id);
 """
 
 # --- DDL: Job logs ---
@@ -264,10 +268,16 @@ CREATE INDEX IF NOT EXISTS idx_settings_key ON settings(key);
 ALL_DDL: list[str] = [
     DDL_SCHEMA_VERSION,
     DDL_OUTLOOK_COMBOS,
+    DDL_USERS,
     DDL_JOBS,
     DDL_JOBS_INDEXES,
     DDL_JOB_LOGS,
     DDL_JOB_LOGS_INDEXES,
+    DDL_USER_SESSIONS,
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON user_sessions(user_id);",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON user_sessions(expires_at);",
+    DDL_AUTH_AUDIT_LOG,
+    "CREATE INDEX IF NOT EXISTS idx_auth_audit_actor ON auth_audit_log(actor_user_id);",
     DDL_SESSION_RESULTS,
     DDL_SESSION_RESULTS_INDEXES,
     DDL_ICLOUD_ACCOUNTS,
@@ -587,5 +597,16 @@ MIGRATIONS: dict[int, list[str]] = {
     # recovery/retry/readmail keep using the original mailbox.
     13: [
         "ALTER TABLE jobs ADD COLUMN mail_account_id TEXT;",
+    ],
+    # v14: Phân quyền Admin - CTV và cô lập dữ liệu (users, sessions, audit log, jobs.owner_user_id)
+    14: [
+        DDL_USERS,
+        DDL_USER_SESSIONS,
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON user_sessions(user_id);",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON user_sessions(expires_at);",
+        DDL_AUTH_AUDIT_LOG,
+        "CREATE INDEX IF NOT EXISTS idx_auth_audit_actor ON auth_audit_log(actor_user_id);",
+        "ALTER TABLE jobs ADD COLUMN owner_user_id INTEGER REFERENCES users(id) ON DELETE RESTRICT;",
+        "CREATE INDEX IF NOT EXISTS idx_jobs_owner_user_id ON jobs(owner_user_id);",
     ],
 }

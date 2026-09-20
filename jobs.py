@@ -3,20 +3,25 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from urllib.parse import quote, unquote, urlsplit
 
+import collections
+from auth.dependencies import AuthContext
 from service import TwoFAService
 
+logger = logging.getLogger("jobs")
 
 JOB_TYPE = "lehaipreshop"
 TERMINAL = {"success", "error", "cancelled"}
 VALID_MODES = {"check_only", "change_2fa", "change_password", "change_password_and_2fa"}
 PROXY_SCHEMES = {"http", "https", "socks5", "socks5h"}
 PROXY_FAILURE_COOLDOWN_SECONDS = 300.0
+PROXY_WAIT_TIMEOUT = 60.0
 
 
 def normalize_proxy(proxy: str) -> str:
@@ -124,6 +129,7 @@ class TwoFAJob:
     login_verified: bool = False
     retry_count: int = 0
     new_password: str = ""           # password mới sau khi đổi (nếu mode có đổi pass)
+    owner_user_id: int | None = None # ID người sở hữu job
     created_at: float = field(default_factory=time.time)
     started_at: float | None = None
     finished_at: float | None = None
@@ -164,7 +170,17 @@ class TwoFAJob:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "log_tail": self.logs[-3:],
+            "owner_user_id": self.owner_user_id,
         }
+
+
+@dataclass(slots=True, eq=False)
+class Subscriber:
+    queue: asyncio.Queue[dict[str, Any]]
+    user_id: int | None
+    is_admin: bool
+    session_id: int | None
+    revoked_event: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 class TwoFAJobManager:
@@ -179,17 +195,22 @@ class TwoFAJobManager:
         "twofa.proxy_pool": [],
     }
 
-    def __init__(self, job_repo, settings_repo, service: TwoFAService | None = None) -> None:
+    def __init__(self, job_repo, settings_repo, service: TwoFAService | None = None, user_repo: Any = None) -> None:
         self.job_repo = job_repo
         self.settings_repo = settings_repo
+        self.user_repo = user_repo
         self.service = service or TwoFAService()
         self.jobs: dict[str, TwoFAJob] = {}
         self.order: list[str] = []
-        self._queue: asyncio.Queue[str | None] = asyncio.Queue()
+        self._queues_by_user: dict[int | None, asyncio.Queue[str]] = collections.defaultdict(asyncio.Queue)
+        self._ready_users: collections.deque[int | None] = collections.deque()
+        self._running_by_user: collections.defaultdict[int | None, int] = collections.defaultdict(int)
         self._workers: list[asyncio.Task] = []
         self._tasks: dict[str, asyncio.Task] = {}
         self._retire_lock = asyncio.Lock()
-        self._subscribers: set[asyncio.Queue] = set()
+        self._scheduler_lock = asyncio.Lock()
+        self._subscribers: set[Subscriber] = set()
+        self._subscribers_by_session: dict[int, set[Subscriber]] = collections.defaultdict(set)
         self._proxy_cooldowns: dict[str, float] = {}
         self.settings = dict(self.DEFAULTS)
         self._load_settings()
@@ -227,8 +248,11 @@ class TwoFAJobManager:
                 continue
             state = self._decode_state(row.get("account_check"))
             status = str(row.get("status") or "error")
+            error = row.get("error")
             if status in {"running", "queued"}:
-                status = "queued"
+                status = "cancelled"
+                error = "Đã dừng do hệ thống khởi động lại"
+                self.job_repo.update_status(str(row["id"]), "cancelled", error=error)
             legacy_kind, legacy_account_state = self._legacy_error_metadata(row.get("error"))
             job = TwoFAJob(
                 id=str(row["id"]),
@@ -255,6 +279,7 @@ class TwoFAJobManager:
                 started_at=row.get("started_at"),
                 finished_at=row.get("finished_at"),
                 logs=[str(item.get("line") or "") for item in self.job_repo.get_logs(str(row["id"]))],
+                owner_user_id=row.get("owner_user_id"),
             )
             self.jobs[job.id] = job
             self.order.append(job.id)
@@ -289,11 +314,18 @@ class TwoFAJobManager:
             "last_failed_proxy": job.last_failed_proxy,
         }, ensure_ascii=False)
 
+    def _enqueue_job(self, job: TwoFAJob) -> None:
+        uid = job.owner_user_id
+        self._queues_by_user[uid].put_nowait(job.id)
+        if uid not in self._ready_users:
+            self._ready_users.append(uid)
+
     def start(self) -> None:
-        self._spawn_workers(int(self.settings["twofa.max_concurrent"]))
+        self._running_by_user.clear()
         for job in self.jobs.values():
             if job.status == "queued":
-                self._queue.put_nowait(job.id)
+                self._enqueue_job(job)
+        self._spawn_workers(int(self.settings["twofa.max_concurrent"]))
 
     def _active_workers(self) -> list[asyncio.Task]:
         self._workers[:] = [task for task in self._workers if not task.done()]
@@ -320,8 +352,6 @@ class TwoFAJobManager:
         if target > len(workers):
             self._spawn_workers(target)
             return
-        for _ in range(max(0, previous - target)):
-            self._queue.put_nowait(None)
 
     async def shutdown(self) -> None:
         for task in list(self._tasks.values()) + self._workers:
@@ -329,9 +359,23 @@ class TwoFAJobManager:
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
-    def add(self, lines: list[str], mode: str = "change_2fa") -> list[dict[str, Any]]:
+    def add(self, lines: list[str], mode: str = "change_2fa", actor: AuthContext | None = None) -> list[dict[str, Any]]:
         if mode not in VALID_MODES:
             raise ValueError(f"Chế độ phải là một trong: {', '.join(sorted(VALID_MODES))}")
+
+        owner_uid = actor.user_id if actor else None
+        is_admin = actor.is_admin if actor else True
+
+        if not is_admin:
+            if len(lines) > 50:
+                raise ValueError("Cộng tác viên chỉ được gửi tối đa 50 tài khoản mỗi lần")
+            active_count = sum(
+                1 for j in self.jobs.values()
+                if j.owner_user_id == owner_uid and j.status in ("queued", "running")
+            )
+            if active_count + len(lines) > 100:
+                raise ValueError("Đã vượt hạn mức 100 job đang hoạt động của tài khoản")
+
         parsed_lines: list[tuple[str, str, str]] = []
         seen: set[str] = set()
         for line in lines:
@@ -358,9 +402,10 @@ class TwoFAJobManager:
                 proxy=assigned_proxy,
                 proxy_slot=proxy_slot,
                 mode=mode,
+                owner_user_id=owner_uid,
             )
-            self.jobs[job.id] = job
-            self.order.append(job.id)
+
+            # 1. Ghi Database trước (Atomicity)
             self.job_repo.create({
                 "id": job.id,
                 "email": email,
@@ -372,29 +417,124 @@ class TwoFAJobManager:
                 "account_check": self._state(job),
                 "created_at": job.created_at,
                 "job_type": JOB_TYPE,
+                "owner_user_id": owner_uid,
             })
-            self._queue.put_nowait(job.id)
+
+            # 2. Chỉ khi DB thành công mới nạp vào RAM và Queue
+            self.jobs[job.id] = job
+            self.order.append(job.id)
+            self._enqueue_job(job)
+
             created.append(job.snapshot())
-            self._broadcast(job)
+            self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
         return created
+
+    async def _pick_next_job_id(self) -> tuple[str | None, int | None]:
+        """Chọn job tiếp theo theo cơ chế Round-Robin users với per-user running cap = 2."""
+        async with self._scheduler_lock:
+            if not self._ready_users:
+                return None, None
+
+            num_users = len(self._ready_users)
+            for _ in range(num_users):
+                uid = self._ready_users.popleft()
+                queue = self._queues_by_user[uid]
+                if queue.empty():
+                    continue
+
+                if uid is not None and self._running_by_user[uid] >= 2:
+                    self._ready_users.append(uid)
+                    continue
+
+                try:
+                    job_id = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    continue
+
+                if not queue.empty():
+                    self._ready_users.append(uid)
+
+                return job_id, uid
+
+            return None, None
 
     async def _worker(self) -> None:
         while True:
-            job_id = await self._queue.get()
-            try:
-                if job_id is None:
-                    if await self._claim_retirement():
-                        return
-                    continue
-                job = self.jobs.get(job_id)
-                if job and job.status == "queued":
+            job_id, uid = await self._pick_next_job_id()
+            if not job_id:
+                await asyncio.sleep(0.25)
+                continue
+
+            job = self.jobs.get(job_id)
+            if job and job.status == "queued":
+                self._running_by_user[uid] += 1
+                try:
                     task = asyncio.create_task(self._run(job))
                     self._tasks[job.id] = task
                     await task
-            finally:
-                if job_id is not None:
+                except asyncio.CancelledError:
+                    # Truyền tiếp CancelledError để shutdown và resize worker hoạt động đúng
+                    raise
+                except Exception as exc:
+                    # Lớp bảo vệ dự phòng (Defense-in-depth) đảm bảo worker không crash
+                    await self._fail_job(job, exc)
+                finally:
+                    self._running_by_user[uid] = max(0, self._running_by_user[uid] - 1)
                     self._tasks.pop(job_id, None)
-                self._queue.task_done()
+
+    async def _fail_job(self, job: TwoFAJob, exc: BaseException) -> None:
+        """Fallback finalizer an toàn ở cấp class: đưa job về trạng thái error và phục hồi."""
+        # 1. Guard check: chỉ xử lý nếu job chưa ở terminal state
+        if job.status not in {"queued", "running"}:
+            return
+
+        logger.exception("Job %s encountered unexpected failure: %s", job.id, exc)
+
+        # 2. Cập nhật RAM trước (đảm bảo tính toàn vẹn trạng thái trong bộ nhớ)
+        job.status = "error"
+        job.error = (str(exc).strip() or type(exc).__name__)[:240]
+        job.error_kind = str(getattr(exc, "error_kind", "technical_error"))
+        job.account_state = str(getattr(exc, "account_state", job.account_state))
+        job.finished_at = time.time()
+        if job.proxy and job.retryable:
+            job.last_failed_proxy = job.proxy
+            self._mark_proxy_failed(job.proxy)
+
+        # 3. Best-effort ghi DB độc lập
+        try:
+            self.job_repo.update_status(
+                job.id, "error", error=job.error,
+                secret=job.secret, account_check=self._state(job),
+            )
+        except Exception as db_exc:
+            logger.error("Failed to persist job failure to DB for job %s: %s", job.id, db_exc)
+
+        # 4. Best-effort ghi log error độc lập
+        try:
+            stamped = f"{time.strftime('%H:%M:%S')}  [lỗi hệ thống] {job.error}"
+            job.logs.append(stamped)
+            if job.rotated_pending_verify:
+                job.logs.append(
+                    f"{time.strftime('%H:%M:%S')}  [verify-failed] 2FA mới đã được lưu nhưng bước xác minh thất bại"
+                )
+            job.logs[:] = job.logs[-300:]
+            self.job_repo.append_log(job.id, stamped)
+        except Exception as log_exc:
+            logger.error("Failed to append error log for job %s: %s", job.id, log_exc)
+
+        # 5. Best-effort broadcast độc lập
+        try:
+            self._broadcast(job)
+        except Exception as bc_exc:
+            logger.error("Failed to broadcast job failure for job %s: %s", job.id, bc_exc)
+
+        # 6. Kích hoạt Auto-Retry nếu job thỏa mãn điều kiện
+        try:
+            if self._should_auto_retry(job):
+                delay = float(self.settings.get("twofa.auto_retry_delay") or 15.0)
+                asyncio.create_task(self._delayed_retry(job.id, delay))
+        except Exception as retry_exc:
+            logger.error("Failed to trigger auto retry for job %s: %s", job.id, retry_exc)
 
     def _mark_proxy_failed(self, proxy: str) -> None:
         if proxy not in self._proxy_cooldowns:
@@ -429,7 +569,9 @@ class TwoFAJobManager:
                 return index + 1, proxy
         return None
 
-    async def _prepare_proxy(self, job: TwoFAJob) -> None:
+    async def _prepare_proxy(self, job: TwoFAJob, log_fn: Callable[[str], None] | None = None) -> None:
+        start_time = time.time()
+        notified_waiting = False
         while True:
             proxies = normalize_proxy_pool(self.settings.get("twofa.proxy_pool") or [])
             if not proxies:
@@ -440,25 +582,26 @@ class TwoFAJobManager:
             if selected:
                 job.proxy_slot, job.proxy = selected
                 return
-            await asyncio.sleep(0.25)
+
+            if not notified_waiting and log_fn:
+                log_fn(f"[chờ proxy] Tất cả proxy ({len(proxies)}) đang bận hoặc tạm nghỉ, đang đợi proxy rảnh...")
+                notified_waiting = True
+
+            if time.time() - start_time > PROXY_WAIT_TIMEOUT:
+                raise TimeoutError(
+                    f"Hết thời gian chờ proxy khả dụng ({int(PROXY_WAIT_TIMEOUT)}s) — tất cả proxy trong pool đều bận hoặc tạm nghỉ"
+                )
+            await asyncio.sleep(0.5)
 
     async def _run(self, job: TwoFAJob) -> None:
-        try:
-            await self._prepare_proxy(job)
-        except asyncio.CancelledError:
-            job.status = "cancelled"
-            job.error = "Đã dừng bởi người dùng"
-            job.finished_at = time.time()
-            self.job_repo.update_status(
-                job.id, "cancelled", error=job.error,
-                secret=job.secret, account_check=self._state(job),
-            )
-            self._broadcast(job)
-            return
+        # Chuyển trạng thái running ngay khi bắt đầu và broadcast tức thì về giao diện
         job.status = "running"
         job.error = None
         job.started_at = time.time()
-        self.job_repo.update_status(job.id, "running", account_check=self._state(job))
+        try:
+            self.job_repo.update_status(job.id, "running", account_check=self._state(job))
+        except Exception as e:
+            logger.error("Failed to update status running in DB for %s: %s", job.id, e)
         self._broadcast(job)
 
         def log(message: str) -> None:
@@ -479,20 +622,26 @@ class TwoFAJobManager:
             stamped = f"{time.strftime('%H:%M:%S')}  {safe[:500]}"
             job.logs.append(stamped)
             job.logs[:] = job.logs[-300:]
-            self.job_repo.append_log(job.id, stamped)
+            try:
+                self.job_repo.append_log(job.id, stamped)
+            except Exception as e:
+                logger.error("Failed to append log in DB for %s: %s", job.id, e)
             self._broadcast(job)
 
         async def checkpoint(new_secret: str) -> None:
             job.secret = new_secret
             job.rotated_pending_verify = True
             job.login_verified = False
-            self.job_repo.update_status(
-                job.id,
-                "running",
-                secret=new_secret,
-                password=job.password,
-                account_check=self._state(job),
-            )
+            try:
+                self.job_repo.update_status(
+                    job.id,
+                    "running",
+                    secret=new_secret,
+                    password=job.password,
+                    account_check=self._state(job),
+                )
+            except Exception as e:
+                logger.error("Failed to update checkpoint in DB for %s: %s", job.id, e)
             self._broadcast(job)
 
         async def password_checkpoint(new_pass: str, new_secret: str) -> None:
@@ -504,17 +653,23 @@ class TwoFAJobManager:
             if new_secret and new_secret != job.secret:
                 job.secret = effective_secret
                 job.rotated_pending_verify = True
-            self.job_repo.update_status(
-                job.id,
-                "running",
-                secret=effective_secret,
-                password=effective_pass,
-                account_check=self._state(job),
-            )
+            try:
+                self.job_repo.update_status(
+                    job.id,
+                    "running",
+                    secret=effective_secret,
+                    password=effective_pass,
+                    account_check=self._state(job),
+                )
+            except Exception as e:
+                logger.error("Failed to update password checkpoint in DB for %s: %s", job.id, e)
             self._broadcast(job)
 
         try:
-            timeout = float(self.settings["twofa.job_timeout"])
+            # 1. Chuẩn bị proxy với timeout và log chờ
+            await self._prepare_proxy(job, log_fn=log)
+
+            timeout = float(self.settings.get("twofa.job_timeout") or 180.0)
             if job.proxy:
                 log(
                     f"[proxy] Proxy #{job.proxy_slot or 1} · {proxy_label(job.proxy)} "
@@ -522,7 +677,8 @@ class TwoFAJobManager:
                 )
             else:
                 log("[proxy] DIRECT · chưa cấu hình proxy cho tài khoản này")
-            # --- Quyết định flow dựa trên mode và checkpoint state ---
+
+            # 2. Quyết định flow dựa trên mode và checkpoint state
             if job.mode == "check_only":
                 result = await self.service.check(
                     email=job.email,
@@ -544,7 +700,7 @@ class TwoFAJobManager:
                 )
             elif job.mode == "change_password_and_2fa":
                 if job.rotated_pending_verify and job.password_changed:
-                    # Password đã đổi và secret mới đã luưu — chỉ cần verify
+                    # Password đã đổi và secret mới đã lưu — chỉ cần verify
                     result = await self.service.verify(
                         email=job.email,
                         password=job.new_password or job.password,
@@ -582,7 +738,8 @@ class TwoFAJobManager:
                     checkpoint=checkpoint,
                     log=log,
                 )
-            # --- Ghi kết quả ---
+
+            # 3. Ghi nhận kết quả thành công
             job.secret = result.secret
             if job.mode in {"change_password", "change_password_and_2fa"} and job.new_password:
                 job.password = job.new_password
@@ -596,52 +753,30 @@ class TwoFAJobManager:
             job.rotated_pending_verify = False
             job.status = "success"
             job.finished_at = time.time()
-            self.job_repo.update_status(
-                job.id, "success", secret=job.secret,
-                password=job.password, account_check=self._state(job),
-            )
+            try:
+                self.job_repo.update_status(
+                    job.id, "success", secret=job.secret,
+                    password=job.password, account_check=self._state(job),
+                )
+            except Exception as e:
+                logger.error("Failed to update success status in DB for %s: %s", job.id, e)
+            self._broadcast(job)
+
         except asyncio.CancelledError:
             job.status = "cancelled"
             job.error = "Đã dừng bởi người dùng"
             job.finished_at = time.time()
-            self.job_repo.update_status(
-                job.id, "cancelled", error=job.error,
-                secret=job.secret, account_check=self._state(job),
-            )
-        except Exception as exc:
-            job.status = "error"
-            job.error = (str(exc).strip() or type(exc).__name__)[:240]
-            job.error_kind = str(getattr(exc, "error_kind", "technical_error"))
-            job.account_state = str(getattr(exc, "account_state", job.account_state))
-            job.finished_at = time.time()
-            if job.proxy and job.retryable:
-                job.last_failed_proxy = job.proxy
-                self._mark_proxy_failed(job.proxy)
-            self.job_repo.update_status(
-                job.id, "error", error=job.error,
-                secret=job.secret, account_check=self._state(job),
-            )
-            if job.rotated_pending_verify:
-                try:
-                    log(
-                        "[verify-failed] 2FA mới đã được lưu nhưng bước đăng nhập "
-                        f"xác minh thất bại: {job.error}"
-                    )
-                except Exception:
-                    pass  # Do not hide the original failure if log persistence also fails.
-            if job.last_failed_proxy:
-                try:
-                    log(
-                        f"[proxy] {proxy_label(job.last_failed_proxy)} lỗi · tạm nghỉ "
-                        f"{int(PROXY_FAILURE_COOLDOWN_SECONDS // 60)} phút"
-                    )
-                except Exception:
-                    pass
-            if self._should_auto_retry(job):
-                delay = float(self.settings["twofa.auto_retry_delay"])
-                asyncio.create_task(self._delayed_retry(job.id, delay))
-        finally:
+            try:
+                self.job_repo.update_status(
+                    job.id, "cancelled", error=job.error,
+                    secret=job.secret, account_check=self._state(job),
+                )
+            except Exception as e:
+                logger.error("Failed to update cancelled status in DB for %s: %s", job.id, e)
             self._broadcast(job)
+
+        except Exception as exc:
+            await self._fail_job(job, exc)
 
     def _should_auto_retry(self, job: TwoFAJob) -> bool:
         return (
@@ -653,15 +788,39 @@ class TwoFAJobManager:
     async def _delayed_retry(self, job_id: str, delay: float) -> None:
         await asyncio.sleep(delay)
         if job_id in self.jobs and self.jobs[job_id].status == "error":
-            self.retry(job_id)
+            try:
+                self._retry_internal(self.jobs[job_id])
+            except Exception:
+                pass
 
-    def retry(self, job_id: str) -> dict[str, Any]:
+    def _require_access(self, job_id: str, actor: AuthContext | None = None) -> TwoFAJob:
         job = self._require(job_id)
+        if actor is None or actor.is_admin:
+            return job
+        if job.owner_user_id != actor.user_id:
+            raise KeyError(job_id)
+        return job
+
+    def retry(self, job_id: str, actor: AuthContext | None = None) -> dict[str, Any]:
+        job = self._require_access(job_id, actor)
+        return self._retry_internal(job)
+
+    def _retry_internal(self, job: TwoFAJob) -> dict[str, Any]:
         if job.status not in TERMINAL:
             raise ValueError("Job đang chạy hoặc đang chờ")
         if not job.retryable:
             label = "tài khoản die" if job.error_kind == "account_die" else "sai thông tin đăng nhập/2FA"
             raise ValueError(f"Không retry tự động: {label}")
+
+        if job.owner_user_id is not None and self.user_repo is not None:
+            owner = self.user_repo.get_by_id(job.owner_user_id)
+            if not owner or owner.get("status") != "active":
+                job.status = "error"
+                job.error = "Tài khoản người tạo đã bị khóa"
+                self.job_repo.update_status(job.id, "error", error=job.error)
+                self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+                return job.snapshot()
+
         proxies = normalize_proxy_pool(self.settings.get("twofa.proxy_pool") or [])
         if job.status == "error" and job.proxy:
             job.last_failed_proxy = job.proxy
@@ -684,44 +843,98 @@ class TwoFAJobManager:
             job.id, "queued", secret=job.secret,
             password=job.new_password or job.password, account_check=self._state(job),
         )
-        self._queue.put_nowait(job.id)
-        self._broadcast(job)
+        self._enqueue_job(job)
+        self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
         return job.snapshot()
 
-    def stop(self, job_id: str) -> dict[str, Any]:
-        job = self._require(job_id)
+    def stop(self, job_id: str, actor: AuthContext) -> dict[str, Any]:
+        job = self._require_access(job_id, actor)
         task = self._tasks.get(job_id)
-        if task:
+        if task and not task.done():
             task.cancel()
-        elif job.status == "queued":
+        if job.status in {"queued", "running"}:
             job.status = "cancelled"
             job.error = "Đã dừng bởi người dùng"
-            self.job_repo.update_status(job.id, "cancelled", error=job.error)
-            self._broadcast(job)
+            job.finished_at = time.time()
+            self.job_repo.update_status(
+                job.id, "cancelled", error=job.error,
+                secret=job.secret, account_check=self._state(job),
+            )
+            self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
         return job.snapshot()
 
-    def stop_all(self) -> None:
-        for job in list(self.jobs.values()):
-            if job.status in {"queued", "running"}:
-                self.stop(job.id)
+    def stop_all(self, actor: AuthContext) -> None:
+        target_jobs = [
+            j for j in self.jobs.values()
+            if (actor.is_admin or j.owner_user_id == actor.user_id)
+            and j.status in {"queued", "running"}
+        ]
+        for job in target_jobs:
+            task = self._tasks.get(job.id)
+            if task and not task.done():
+                task.cancel()
+            job.status = "cancelled"
+            job.error = "Đã dừng bởi người dùng"
+            job.finished_at = time.time()
+            self.job_repo.update_status(
+                job.id, "cancelled", error=job.error,
+                secret=job.secret, account_check=self._state(job),
+            )
+            self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
 
-    def delete(self, job_id: str) -> None:
-        job = self._require(job_id)
+    async def stop_all_for_user(self, user_id: int) -> None:
+        """Dừng tất cả job của user_id khi Admin vô hiệu hóa tài khoản."""
+        target_jobs = [
+            j for j in self.jobs.values()
+            if j.owner_user_id == user_id and j.status in {"queued", "running"}
+        ]
+        for job in target_jobs:
+            task = self._tasks.get(job.id)
+            if task:
+                task.cancel()
+            elif job.status == "queued":
+                job.status = "cancelled"
+                job.error = "Tài khoản bị vô hiệu hóa bởi Quản trị viên"
+                self.job_repo.update_status(job.id, "cancelled", error=job.error)
+                self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+
+    def delete(self, job_id: str, actor: AuthContext) -> None:
+        job = self._require_access(job_id, actor)
         if job.status not in TERMINAL:
             raise ValueError("Không thể xóa job đang chạy")
+        owner_uid = job.owner_user_id
         self.job_repo.delete(job_id)
         self.jobs.pop(job_id, None)
         self.order = [item for item in self.order if item != job_id]
-        self._broadcast_raw({"type": "removed", "id": job_id})
+        payload = {"type": "removed", "id": job_id}
+        self._broadcast_user(owner_uid, payload)
+        if owner_uid is not None:
+            self._broadcast_admin(payload)
 
-    def clear(self) -> int:
-        if any(job.status not in TERMINAL for job in self.jobs.values()):
-            raise ValueError("Hãy dừng toàn bộ job trước khi dọn danh sách")
-        count = self.job_repo.delete_all(JOB_TYPE)
-        self.jobs.clear()
-        self.order.clear()
-        self._broadcast_raw({"type": "snapshot", "jobs": []})
-        return count
+    def clear(self, actor: AuthContext) -> int:
+        if actor.is_admin:
+            if any(job.status not in TERMINAL for job in self.jobs.values()):
+                raise ValueError("Hãy dừng toàn bộ job trước khi dọn danh sách")
+            count = self.job_repo.delete_all(JOB_TYPE)
+            self.jobs.clear()
+            self.order.clear()
+            self._broadcast_raw({"type": "snapshot", "jobs": []})
+            return count
+        else:
+            user_jobs = [
+                j for j in self.jobs.values()
+                if j.owner_user_id == actor.user_id
+            ]
+            if any(j.status not in TERMINAL for j in user_jobs):
+                raise ValueError("Hãy dừng các job của bạn trước khi dọn danh sách")
+            count = 0
+            for j in user_jobs:
+                self.job_repo.delete(j.id)
+                self.jobs.pop(j.id, None)
+                count += 1
+            self.order = [item for item in self.order if item in self.jobs]
+            self._broadcast_user(actor.user_id, {"type": "snapshot", "jobs": []})
+            return count
 
     @staticmethod
     def _combo_line(job: TwoFAJob) -> str:
@@ -730,7 +943,7 @@ class TwoFAJobManager:
         }) else job.password
         return "|".join((job.email, effective_pass, job.secret))
 
-    def output(self) -> list[str]:
+    def output(self, actor: AuthContext) -> list[str]:
         lines = []
         for job_id in self.order:
             job = self.jobs.get(job_id)
@@ -738,25 +951,33 @@ class TwoFAJobManager:
                 continue
             if job.status != "success" or not job.login_verified:
                 continue
-            if job.mode == "check_only":
-                continue  # check_only không đưa vào output
+            if not actor.is_admin and job.owner_user_id != actor.user_id:
+                continue
             lines.append(self._combo_line(job))
         return lines
 
-    def failed_output(self) -> list[str]:
+    def failed_output(self, actor: AuthContext) -> list[str]:
         lines = []
         for job_id in self.order:
             job = self.jobs.get(job_id)
-            if job and job.status in {"error", "cancelled"}:
-                # Checkpointed jobs use the new password/2FA so copied combos stay usable.
-                lines.append(self._combo_line(job))
+            if not job or job.status not in {"error", "cancelled"}:
+                continue
+            if not actor.is_admin and job.owner_user_id != actor.user_id:
+                continue
+            lines.append(self._combo_line(job))
         return lines
 
-    def snapshots(self) -> list[dict[str, Any]]:
-        return [self.jobs[job_id].snapshot() for job_id in self.order if job_id in self.jobs]
+    def snapshots(self, actor: AuthContext) -> list[dict[str, Any]]:
+        if actor.is_admin:
+            return [self.jobs[job_id].snapshot() for job_id in self.order if job_id in self.jobs]
+        return [
+            self.jobs[job_id].snapshot()
+            for job_id in self.order
+            if job_id in self.jobs and self.jobs[job_id].owner_user_id == actor.user_id
+        ]
 
-    def logs(self, job_id: str) -> list[str]:
-        return list(self._require(job_id).logs)
+    def logs(self, job_id: str, actor: AuthContext) -> list[str]:
+        return list(self._require_access(job_id, actor).logs)
 
     async def update_settings(self, values: dict[str, Any]) -> dict[str, Any]:
         previous = int(self.settings["twofa.max_concurrent"])
@@ -772,25 +993,66 @@ class TwoFAJobManager:
             await self._resize_workers(previous, target)
         return dict(self.settings)
 
-    def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=100)
-        self._subscribers.add(queue)
-        return queue
+    def subscribe(self, actor: AuthContext) -> Subscriber:
+        sub = Subscriber(
+            queue=asyncio.Queue(maxsize=100),
+            user_id=actor.user_id,
+            is_admin=actor.is_admin,
+            session_id=actor.session_id,
+        )
+        self._subscribers.add(sub)
+        if actor.session_id is not None:
+            self._subscribers_by_session[actor.session_id].add(sub)
+        return sub
 
-    def unsubscribe(self, queue: asyncio.Queue[dict[str, Any]]) -> None:
-        self._subscribers.discard(queue)
+    def unsubscribe(self, sub: Subscriber) -> None:
+        self._subscribers.discard(sub)
+        if sub.session_id is not None:
+            self._subscribers_by_session[sub.session_id].discard(sub)
+
+    def revoke_session_streams(self, session_id: int) -> None:
+        subs = list(self._subscribers_by_session.get(session_id, set()))
+        for sub in subs:
+            sub.revoked_event.set()
+
+    def revoke_multiple_sessions(self, session_ids: list[int]) -> None:
+        for sid in session_ids:
+            self.revoke_session_streams(sid)
 
     def _broadcast(self, job: TwoFAJob) -> None:
-        self._broadcast_raw({"type": "job", "job": job.snapshot()})
+        """Phát sự kiện cập nhật job snapshot đến đúng đối tượng theo phân quyền."""
+        self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+
+    def _broadcast_job(self, job: TwoFAJob, payload: dict[str, Any]) -> None:
+        for sub in list(self._subscribers):
+            if sub.is_admin or (job.owner_user_id is not None and sub.user_id == job.owner_user_id):
+                self._send_sub(sub, payload)
+
+    def _broadcast_user(self, user_id: int | None, payload: dict[str, Any]) -> None:
+        if user_id is None:
+            self._broadcast_admin(payload)
+            return
+        for sub in list(self._subscribers):
+            if sub.user_id == user_id:
+                self._send_sub(sub, payload)
+
+    def _broadcast_admin(self, payload: dict[str, Any]) -> None:
+        for sub in list(self._subscribers):
+            if sub.is_admin:
+                self._send_sub(sub, payload)
 
     def _broadcast_raw(self, payload: dict[str, Any]) -> None:
-        for queue in list(self._subscribers):
-            if queue.full():
-                try:
-                    queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
-            queue.put_nowait(payload)
+        for sub in list(self._subscribers):
+            self._send_sub(sub, payload)
+
+    @staticmethod
+    def _send_sub(sub: Subscriber, payload: dict[str, Any]) -> None:
+        if sub.queue.full():
+            try:
+                sub.queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+        sub.queue.put_nowait(payload)
 
     def _require(self, job_id: str) -> TwoFAJob:
         job = self.jobs.get(job_id)
