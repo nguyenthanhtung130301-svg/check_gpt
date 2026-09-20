@@ -838,6 +838,7 @@
               <button class="user-action-small ${isActive ? 'danger' : ''}" data-user-action="toggle-status">
                 ${isActive ? 'Khóa' : 'Mở khóa'}
               </button>
+              <button class="user-action-small danger" data-user-action="delete-user" title="Xóa vĩnh viễn CTV">Xóa</button>
             </div>
           </td>
         </tr>`;
@@ -923,6 +924,17 @@
         body: JSON.stringify({ status: nextStatus }),
       });
       toast(`Đã ${actionLabel} tài khoản CTV.`);
+      await loadCollaborators();
+    } catch (err) {
+      toast(`Lỗi: ${err.message}`, 'error');
+    }
+  }
+
+  async function handleDeleteUser(userId, username) {
+    if (!confirm(`Bạn có chắc muốn XÓA VĨNH VIỄN cộng tác viên "${username}" không?\nToàn bộ phiên đăng nhập của CTV này sẽ bị hủy ngay lập tức.`)) return;
+    try {
+      await api(`/api/admin/users/${userId}`, { method: 'DELETE' });
+      toast(`Đã xóa vĩnh viễn cộng tác viên ${username}`);
       await loadCollaborators();
     } catch (err) {
       toast(`Lỗi: ${err.message}`, 'error');
@@ -1164,6 +1176,8 @@
       openAdminResetPassModal(userId, username);
     } else if (action === 'toggle-status') {
       handleToggleUserStatus(userId, status);
+    } else if (action === 'delete-user') {
+      handleDeleteUser(userId, username);
     }
   });
 

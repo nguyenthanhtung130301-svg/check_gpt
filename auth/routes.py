@@ -277,4 +277,33 @@ def create_auth_routers(
         )
         return {"ok": True}
 
+    @admin_router.delete("/users/{user_id}", dependencies=[Depends(require_admin), Depends(require_csrf)])
+    async def delete_collaborator(
+        user_id: int,
+        actor: AuthContext = Depends(require_admin),
+    ) -> dict[str, bool]:
+        target = user_repo.get_by_id(user_id)
+        if not target or target["role"] != "collaborator":
+            raise HTTPException(status_code=404, detail="Không tìm thấy cộng tác viên")
+
+        # 1. Thu hồi toàn bộ phiên đăng nhập của CTV này
+        revoked = session_repo.delete_all_for_user(user_id)
+        manager.revoke_multiple_sessions(revoked)
+
+        # 2. DỪNG NGAY LẬP TỨC toàn bộ job queued và running của CTV này
+        await manager.stop_all_for_user(user_id)
+
+        # 3. Xóa user khỏi database
+        user_repo.delete_user(user_id)
+
+        # 4. Ghi vết audit log
+        audit_repo.log(
+            "collaborator_delete",
+            "success",
+            actor_user_id=actor.user_id,
+            target_user_id=user_id,
+            detail={"username": target["username"]},
+        )
+        return {"ok": True}
+
     return auth_router, admin_router
