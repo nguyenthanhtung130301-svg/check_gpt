@@ -1,19 +1,62 @@
 (() => {
   'use strict';
 
-  const state = { token: '', jobs: new Map(), filter: 'all', settings: {}, events: null, output: '', draftTimer: null, pendingLaunch: null, activeMode: 'check_only', selectedJob: null };
+  const state = {
+    csrfToken: '',
+    user: null,
+    capabilities: null,
+    jobs: new Map(),
+    filter: 'all',
+    settings: {},
+    events: null,
+    output: '',
+    pendingLaunch: null,
+    activeMode: 'check_only',
+    selectedJob: null,
+    pollTimer: null,
+    isPolling: false,
+    pollEpoch: 0,
+    activeLogTimer: null,
+  };
+
   const $ = (id) => document.getElementById(id);
-  const statusLabels = { queued: 'ĐANG CHỜ', running: 'ĐANG CHẠY', success: 'THÀNH CÔNG', error: 'LỖI', cancelled: 'ĐÃ DỪNG' };
+  const statusLabels = {
+    queued: 'ĐANG CHỜ',
+    running: 'ĐANG CHẠY',
+    success: 'THÀNH CÔNG',
+    error: 'LỖI',
+    cancelled: 'ĐÃ DỪNG',
+  };
   const errorLabels = {
     account_die: 'TÀI KHOẢN DIE',
     invalid_credentials: 'SAI MẬT KHẨU / 2FA',
     technical_error: 'LỖI KỸ THUẬT',
   };
   const MODE_LABELS = {
-    check_only: { short: 'CHỈ KIỂM TRA', title: 'Kiểm tra tài khoản', icon: '✓', description: 'Xác định trạng thái Live, Free hoặc Plus mà không thay đổi thông tin.' },
-    change_2fa: { short: 'ĐỔI 2FA', title: 'Cập nhật 2FA', icon: '⟳', description: 'Tạo khóa TOTP mới, sau đó đăng nhập lại để kiểm tra.' },
-    change_password: { short: 'ĐỔI MẬT KHẨU', title: 'Cập nhật mật khẩu', icon: '🔑', description: 'Tạo mật khẩu mới, giữ nguyên 2FA và xác minh phiên đăng nhập.' },
-    change_password_and_2fa: { short: 'MẬT KHẨU + 2FA', title: 'Cập nhật toàn bộ', icon: '⬡', description: 'Thay mật khẩu và khóa TOTP trong cùng một quy trình xác minh.' },
+    check_only: {
+      short: 'CHỈ KIỂM TRA',
+      title: 'Kiểm tra tài khoản',
+      icon: '✓',
+      description: 'Xác định trạng thái Live, Free hoặc Plus mà không thay đổi thông tin.',
+    },
+    change_2fa: {
+      short: 'ĐỔI 2FA',
+      title: 'Cập nhật 2FA',
+      icon: '⟳',
+      description: 'Tạo khóa TOTP mới, sau đó đăng nhập lại để kiểm tra.',
+    },
+    change_password: {
+      short: 'ĐỔI MẬT KHẨU',
+      title: 'Cập nhật mật khẩu',
+      icon: '🔑',
+      description: 'Tạo mật khẩu mới, giữ nguyên 2FA và xác minh phiên đăng nhập.',
+    },
+    change_password_and_2fa: {
+      short: 'MẬT KHẨU + 2FA',
+      title: 'Cập nhật toàn bộ',
+      icon: '⬡',
+      description: 'Thay mật khẩu và khóa TOTP trong cùng một quy trình xác minh.',
+    },
   };
 
   function planLabel(job) {
@@ -54,22 +97,71 @@
     ));
   }
 
+  function cleanErrorMessage(raw) {
+    if (!raw) return '';
+    const str = String(raw).trim();
+    if (str.includes('HTTP 401') || str.includes('Login failed')) return 'Sai mật khẩu hoặc 2FA (HTTP 401)';
+    if (str.includes('HTTP 400')) return 'Lỗi tham số yêu cầu (HTTP 400)';
+    if (str.includes('HTTP 403') || str.includes('Cloudflare')) return 'Bị chặn IP / Cloudflare (HTTP 403)';
+    if (str.includes('HTTP 429')) return 'Bị giới hạn tần suất (HTTP 429)';
+    if (str.includes('TimeoutError') || str.includes('Hết thời gian')) return 'Quá thời gian kết nối (Timeout)';
+    if (str.includes('Đã dừng')) return 'Đã dừng bởi người dùng';
+    const jsonIndex = str.indexOf('{');
+    if (jsonIndex > 10) {
+      return str.slice(0, jsonIndex).replace(/[-:]\s*$/, '').trim();
+    }
+    return str.length > 45 ? `${str.slice(0, 42)}…` : str;
+  }
+
   function accountCheck(job) {
-    if (isVerifyFailure(job)) return { label: '2FA ĐÃ ĐỔI', className: 'verify-failed', detail: job.error || 'Đăng nhập verify bằng 2FA mới thất bại' };
-    if (job.account_state === 'die') return { label: 'DIE', className: 'die', detail: job.error || 'Tài khoản đã bị vô hiệu hóa' };
-    if (job.account_state === 'live') return { label: `LIVE · ${planLabel(job)}`, className: 'live', detail: `Gói kiểm tra từ ${job.plan_source || 'session'}` };
-    if (job.error_kind === 'invalid_credentials') return { label: 'CHƯA XÁC MINH', className: 'unknown', detail: job.error || 'Thông tin đăng nhập hoặc 2FA không đúng' };
-    return { label: 'CHƯA RÕ', className: 'unknown', detail: job.error || 'Chưa kiểm tra xong tài khoản' };
+    const errorSummary = cleanErrorMessage(job.error);
+    if (isVerifyFailure(job)) {
+      return {
+        label: '2FA ĐÃ ĐỔI',
+        className: 'verify-failed',
+        detail: errorSummary || 'Đăng nhập verify bằng 2FA mới thất bại',
+      };
+    }
+    if (job.account_state === 'die') {
+      return { label: 'DIE', className: 'die', detail: errorSummary || 'Tài khoản đã bị vô hiệu hóa' };
+    }
+    if (job.account_state === 'live') {
+      return {
+        label: `LIVE · ${planLabel(job)}`,
+        className: 'live',
+        detail: `Gói từ ${job.plan_source || 'session'}`,
+      };
+    }
+    if (job.error_kind === 'invalid_credentials') {
+      return {
+        label: 'CHƯA XÁC MINH',
+        className: 'unknown',
+        detail: errorSummary || 'Thông tin đăng nhập hoặc 2FA không đúng',
+      };
+    }
+    return { label: 'CHƯA RÕ', className: 'unknown', detail: errorSummary || 'Chưa kiểm tra xong' };
   }
 
   async function api(path, options = {}) {
-    const headers = { ...(options.headers || {}), 'X-Auth-Token': state.token };
-    if (options.body) headers['Content-Type'] = 'application/json';
+    const headers = { ...(options.headers || {}) };
+    const method = (options.method || 'GET').toUpperCase();
+    if (!['GET', 'HEAD', 'OPTIONS', 'TRACE'].includes(method) && state.csrfToken) {
+      headers['X-CSRF-Token'] = state.csrfToken;
+    }
+    if (options.body && typeof options.body === 'string' && !headers['Content-Type']) {
+      headers['Content-Type'] = 'application/json';
+    }
+
     const response = await fetch(path, { ...options, headers });
     if (!response.ok) {
       let message = `HTTP ${response.status}`;
-      try { message = (await response.json()).detail || message; } catch (_) { /* plain error */ }
-      throw new Error(message);
+      try {
+        const errJson = await response.json();
+        message = errJson.detail || message;
+      } catch (_) { /* plain error */ }
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     return response.headers.get('content-type')?.includes('json') ? response.json() : response.text();
   }
@@ -86,7 +178,10 @@
     const value = $('combo-input').value;
     const count = value.trim() ? value.split(/\r?\n/).filter(Boolean).length : 0;
     $('line-count').textContent = `${count} dòng`;
-    $('line-numbers').textContent = Array.from({ length: Math.max(1, value.split(/\r?\n/).length) }, (_, i) => i + 1).join('\n');
+    $('line-numbers').textContent = Array.from(
+      { length: Math.max(1, value.split(/\r?\n/).length) },
+      (_, i) => i + 1
+    ).join('\n');
     document.querySelector('.cursor-hint').style.display = value ? 'none' : 'block';
   }
 
@@ -167,20 +262,6 @@
     });
   }
 
-  function scheduleDraftSave() {
-    updateEditor();
-    clearTimeout(state.draftTimer);
-    state.draftTimer = setTimeout(async () => {
-      state.settings['twofa.input_draft'] = $('combo-input').value;
-      try {
-        const data = await api('/api/settings', { method: 'PUT', body: JSON.stringify(settingsPayload()) });
-        state.settings = data.settings;
-      } catch (error) {
-        toast(`Không lưu được danh sách nháp: ${error.message}`, 'error');
-      }
-    }, 450);
-  }
-
   function counts() {
     const jobs = [...state.jobs.values()];
     const running = jobs.filter((job) => ['queued', 'running'].includes(job.status)).length;
@@ -211,6 +292,27 @@
     return jobs;
   }
 
+  function formatStartTime(timestamp) {
+    if (!timestamp) {
+      return '<span class="time-capsule-pill pending">Chờ chạy</span>';
+    }
+    const date = new Date(timestamp * 1000);
+    const day = String(date.getDate()).padStart(2, '0');
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const year = date.getFullYear();
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+
+    const dateStr = `${day}/${month}/${year}`;
+    const timeStr = `${hours}:${minutes}:${seconds}`;
+
+    return `<div class="time-capsule-cell" title="Bắt đầu: ${dateStr} ${timeStr}">
+      <span class="time-capsule-date"><span class="date-icon">📅</span>${dateStr}</span>
+      <span class="time-capsule-pill"><span class="time-icon">⏱</span>${timeStr}</span>
+    </div>`;
+  }
+
   function render() {
     counts();
     const jobs = filteredJobs();
@@ -235,6 +337,7 @@
       return `<tr data-id="${job.id}" class="job-row${verifyFailed ? ' verify-failed-row' : ''}${selected}" title="${escapeHtml(job.error || '')}">
         <td class="account"><strong>${escapeHtml(job.email)}</strong><span>${job.id.slice(0, 10).toUpperCase()} · <b class="job-mode mode-${job.mode}">${escapeHtml(modeShort)}</b></span>${job.has_proxy ? `<small class="proxy-assignment">PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</small>` : ''}</td>
         <td><span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''} ${job.plan ? `plan-${escapeHtml(job.plan)}` : ''}">${escapeHtml(statusLabel(job))}</span></td>
+        <td>${formatStartTime(job.started_at)}</td>
         <td><div class="account-result"><span class="account-badge ${check.className} ${job.plan ? `plan-${escapeHtml(job.plan)}` : ''}">${escapeHtml(check.label)}</span>${planExpiry ? `<small class="plan-expiry">${escapeHtml(planExpiry)}</small>` : ''}<small>${escapeHtml(checkpoint)}</small></div></td>
         <td>${job.retry_count}</td>
         <td><div class="row-actions">
@@ -247,7 +350,7 @@
   }
 
   function escapeHtml(value) {
-    return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
+    return String(value || '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
   }
 
   function renderOutput() {
@@ -261,11 +364,14 @@
   }
 
   async function refreshOutput() {
+    if (!state.user) return;
     try {
       state.output = await api('/api/output');
       renderOutput();
     } catch (error) {
-      toast(`Không tải được output: ${error.message}`, 'error');
+      if (error.status !== 401) {
+        toast(`Không tải được output: ${error.message}`, 'error');
+      }
     }
   }
 
@@ -311,6 +417,11 @@
   function openLaunchConfirmation() {
     const lines = $('combo-input').value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
     if (!lines.length) return toast('Hãy nhập ít nhất một combo.', 'error');
+
+    if (state.user && state.user.role !== 'admin' && lines.length > 50) {
+      return toast('Cộng tác viên chỉ được gửi tối đa 50 tài khoản mỗi lần.', 'error');
+    }
+
     const proxies = proxyPool();
     const mode = modeValue();
     const info = MODE_LABELS[mode] || { title: mode, icon: '?', description: '' };
@@ -322,7 +433,9 @@
     $('confirm-message').textContent = info.description;
     $('confirm-count').textContent = lines.length;
     $('confirm-concurrency').textContent = $('quick-concurrency').value;
-    $('confirm-proxy').textContent = proxies.length ? `${proxies.length} PROXY XOAY VÒNG` : 'DIRECT';
+    $('confirm-proxy').textContent = (state.user?.role === 'admin' && proxies.length)
+      ? `${proxies.length} PROXY XOAY VÒNG`
+      : 'HỆ THỐNG GÁN TỰ ĐỘNG';
     $('confirm-action').textContent = info.short;
     $('confirm-launch').className = `button ${isDestructive ? 'confirm-change' : 'confirm-check'}`;
     $('confirm-launch').textContent = isDestructive ? `Xác nhận — ${info.title}` : 'Đúng, chỉ kiểm tra';
@@ -359,6 +472,56 @@
     } catch (error) { toast(error.message, 'error'); }
   }
 
+  function updateInlineLogHeader(job) {
+    if (!job || state.selectedJob !== job.id) return;
+    $('inline-log-title').textContent = job.email;
+    const verifyFailed = isVerifyFailure(job);
+    const timeChip = job.started_at
+      ? `<span class="proxy-chip time-chip" title="Thời gian bắt đầu">⏱ ${new Date(job.started_at * 1000).toLocaleTimeString('vi-VN')}</span>`
+      : '';
+    $('inline-log-status').innerHTML = `<span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(job))}</span>${timeChip}${job.has_proxy ? `<span class="proxy-chip">PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</span>` : '<span class="proxy-chip direct">DIRECT</span>'}`;
+    const stopBtn = $('btn-stop-inline-job');
+    if (stopBtn) {
+      stopBtn.hidden = !['queued', 'running'].includes(job.status);
+    }
+    $('inline-log-checkpoint').hidden = !verifyFailed;
+  }
+
+  async function fetchActiveLogs(id) {
+    if (state.selectedJob !== id) return;
+    try {
+      const data = await api(`/api/jobs/${id}/logs`);
+      if (state.selectedJob !== id) return;
+      const job = state.jobs.get(id);
+      const logs = [...(data.logs || [])];
+      if (job?.error && !logs.some((line) => line.includes(job.error))) {
+        logs.push(`[kết quả lỗi] ${job.error}`);
+      }
+      $('inline-log-content').textContent = logs.join('\n') || 'Chưa có log.';
+      $('inline-log-content').scrollTop = $('inline-log-content').scrollHeight;
+    } catch (error) {
+      if (state.selectedJob === id) {
+        $('inline-log-content').textContent = error.message;
+      }
+    }
+  }
+
+  function refreshActiveLogDebounced(id, delayMs = 300, immediate = false) {
+    if (state.selectedJob !== id) return;
+    if (state.activeLogTimer) {
+      clearTimeout(state.activeLogTimer);
+      state.activeLogTimer = null;
+    }
+    if (immediate) {
+      fetchActiveLogs(id);
+    } else {
+      state.activeLogTimer = setTimeout(() => {
+        state.activeLogTimer = null;
+        fetchActiveLogs(id);
+      }, delayMs);
+    }
+  }
+
   async function openLogs(id) {
     const job = state.jobs.get(id);
     if (!job) return;
@@ -370,23 +533,16 @@
     render();
     const panel = $('inline-log-panel');
     panel.style.display = 'flex';
-    $('inline-log-title').textContent = job.email;
-    const verifyFailed = isVerifyFailure(job);
-    $('inline-log-status').innerHTML = `<span class="status ${job.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(job))}</span>${job.has_proxy ? `<span class="proxy-chip">PROXY #${job.proxy_slot} · ${escapeHtml(job.proxy_label)}</span>` : '<span class="proxy-chip direct">DIRECT</span>'}`;
-    $('inline-log-checkpoint').hidden = !verifyFailed;
+    updateInlineLogHeader(job);
     $('inline-log-content').textContent = 'Đang tải log...';
-    try {
-      const data = await api(`/api/jobs/${id}/logs`);
-      const logs = [...data.logs];
-      if (job.error && !logs.some((line) => line.includes(job.error))) {
-        logs.push(`[kết quả lỗi] ${job.error}`);
-      }
-      $('inline-log-content').textContent = logs.join('\n') || 'Chưa có log.';
-      $('inline-log-content').scrollTop = $('inline-log-content').scrollHeight;
-    } catch (error) { $('inline-log-content').textContent = error.message; }
+    await fetchActiveLogs(id);
   }
 
   function closeInlineLog() {
+    if (state.activeLogTimer) {
+      clearTimeout(state.activeLogTimer);
+      state.activeLogTimer = null;
+    }
     $('inline-log-panel').style.display = 'none';
     state.selectedJob = null;
     render();
@@ -394,23 +550,28 @@
 
   function openDrawer(id) {
     closeDrawers();
-    $(id).classList.add('open'); $(id).setAttribute('aria-hidden', 'false');
+    $(id).classList.add('open');
+    $(id).setAttribute('aria-hidden', 'false');
     $('drawer-backdrop').classList.add('open');
   }
 
   function closeDrawers() {
-    document.querySelectorAll('.drawer').forEach((drawer) => { drawer.classList.remove('open'); drawer.setAttribute('aria-hidden', 'true'); });
+    document.querySelectorAll('.drawer').forEach((drawer) => {
+      drawer.classList.remove('open');
+      drawer.setAttribute('aria-hidden', 'true');
+    });
     $('drawer-backdrop').classList.remove('open');
   }
 
   function loadSettingsForm() {
-    const concurrency = state.settings['twofa.max_concurrent'];
+    if (!state.settings) return;
+    const concurrency = state.settings['twofa.max_concurrent'] || 3;
     $('setting-concurrency').value = concurrency;
     $('quick-concurrency').value = concurrency;
-    $('setting-timeout').value = state.settings['twofa.job_timeout'];
-    $('setting-auto-retry').checked = state.settings['twofa.auto_retry'];
-    $('setting-retry-max').value = state.settings['twofa.auto_retry_max'];
-    $('setting-retry-delay').value = state.settings['twofa.auto_retry_delay'];
+    $('setting-timeout').value = state.settings['twofa.job_timeout'] || 180;
+    $('setting-auto-retry').checked = Boolean(state.settings['twofa.auto_retry']);
+    $('setting-retry-max').value = state.settings['twofa.auto_retry_max'] ?? 2;
+    $('setting-retry-delay').value = state.settings['twofa.auto_retry_delay'] ?? 5;
     $('setting-proxy-pool').value = proxyPool().join('\n');
     updateProxySummary();
     resetProxyTest();
@@ -420,21 +581,22 @@
   function settingsPayload(maxConcurrent = state.settings['twofa.max_concurrent']) {
     return {
       max_concurrent: Number(maxConcurrent),
-      job_timeout: Number(state.settings['twofa.job_timeout']),
+      job_timeout: Number(state.settings['twofa.job_timeout'] || 180),
       auto_retry: Boolean(state.settings['twofa.auto_retry']),
-      auto_retry_max: Number(state.settings['twofa.auto_retry_max']),
-      auto_retry_delay: Number(state.settings['twofa.auto_retry_delay']),
+      auto_retry_max: Number(state.settings['twofa.auto_retry_max'] ?? 2),
+      auto_retry_delay: Number(state.settings['twofa.auto_retry_delay'] ?? 5),
       change_enabled: Boolean(state.settings['twofa.change_enabled']),
-      input_draft: $('combo-input').value,
+      input_draft: '',
       proxy_pool: proxyPool(),
     };
   }
 
   async function saveQuickConcurrency() {
+    if (state.user?.role !== 'admin') return;
     const input = $('quick-concurrency');
     const value = Number(input.value);
     if (!Number.isInteger(value) || value < 1 || value > 10) {
-      input.value = state.settings['twofa.max_concurrent'];
+      input.value = state.settings['twofa.max_concurrent'] || 3;
       throw new Error('Số luồng phải từ 1 đến 10.');
     }
     if (value === Number(state.settings['twofa.max_concurrent'])) return;
@@ -469,6 +631,9 @@
 
   async function saveSettings(event) {
     event.preventDefault();
+    if (state.user?.role !== 'admin') {
+      return toast('Chỉ Quản trị viên mới được sửa thiết lập', 'error');
+    }
     try {
       const payload = {
         max_concurrent: Number($('setting-concurrency').value),
@@ -477,54 +642,408 @@
         auto_retry_max: Number($('setting-retry-max').value),
         auto_retry_delay: Number($('setting-retry-delay').value),
         change_enabled: Boolean(state.settings['twofa.change_enabled']),
-        input_draft: $('combo-input').value,
+        input_draft: '',
         proxy_pool: proxyInputLines(),
       };
       const data = await api('/api/settings', { method: 'PUT', body: JSON.stringify(payload) });
       state.settings = data.settings;
       loadSettingsForm();
-      closeDrawers(); toast('Đã lưu cấu hình runtime vào SQLite.');
+      closeDrawers();
+      toast('Đã lưu cấu hình runtime vào SQLite.');
     } catch (error) { toast(error.message, 'error'); }
   }
 
   async function exportOutput() {
     try {
-      const response = await fetch('/api/output', { headers: { 'X-Auth-Token': state.token } });
+      const response = await fetch('/api/output');
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'twofa-success.txt'; anchor.click();
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'twofa-success.txt';
+      anchor.click();
       URL.revokeObjectURL(url);
     } catch (error) { toast(error.message, 'error'); }
   }
 
+  function resetSensitiveState() {
+    stopPollingFallback();
+    if (state.activeLogTimer) {
+      clearTimeout(state.activeLogTimer);
+      state.activeLogTimer = null;
+    }
+    state.csrfToken = '';
+    state.user = null;
+    state.capabilities = null;
+    state.jobs.clear();
+    state.output = '';
+    state.selectedJob = null;
+    if (state.events) {
+      state.events.close();
+      state.events = null;
+    }
+    if ($('btn-login-trigger')) $('btn-login-trigger').hidden = false;
+    if ($('user-pill')) $('user-pill').hidden = true;
+    if ($('btn-open-users-pill')) $('btn-open-users-pill').hidden = true;
+    $('nav-users').hidden = true;
+    $('open-settings').style.display = 'none';
+    $('open-proxy-settings').style.display = 'none';
+    const concControl = $('quick-concurrency').closest('.concurrency-control');
+    if (concControl) concControl.style.display = 'none';
+    $('connection-label').textContent = 'CHƯA ĐĂNG NHẬP';
+    closeDrawers();
+    render();
+    renderOutput();
+  }
+
+  function applyUserSession(user, csrfToken, capabilities) {
+    state.user = user;
+    state.csrfToken = csrfToken;
+    state.capabilities = capabilities || {};
+    if ($('btn-login-trigger')) $('btn-login-trigger').hidden = true;
+    if ($('user-pill')) $('user-pill').hidden = false;
+    $('user-display-name').textContent = user.username;
+    $('user-role-badge').textContent = user.role.toUpperCase();
+    $('user-role-badge').className = `user-role-badge role-${user.role}`;
+
+    const isAdmin = user.role === 'admin';
+    $('nav-users').hidden = !isAdmin;
+    if ($('btn-open-users-pill')) $('btn-open-users-pill').hidden = !isAdmin;
+    $('open-settings').style.display = isAdmin ? 'flex' : 'none';
+    $('open-proxy-settings').style.display = isAdmin ? 'inline-flex' : 'none';
+    const concControl = $('quick-concurrency').closest('.concurrency-control');
+    if (concControl) concControl.style.display = isAdmin ? 'inline-flex' : 'none';
+  }
+
+  function openLoginModal() {
+    $('login-error').hidden = true;
+    $('login-password').value = '';
+    try { $('login-modal').showModal(); } catch (_) {}
+  }
+
+  function closeLoginModal() {
+    try { $('login-modal').close(); } catch (_) {}
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    const username = $('login-username').value.trim();
+    const password = $('login-password').value;
+    $('login-error').hidden = true;
+    $('login-submit').disabled = true;
+    try {
+      await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      });
+      closeLoginModal();
+      $('login-password').value = '';
+      await init();
+      toast(`Đăng nhập thành công!`);
+    } catch (err) {
+      $('login-error').textContent = err.message;
+      $('login-error').hidden = false;
+    } finally {
+      $('login-submit').disabled = false;
+    }
+  }
+
+  async function handleLogout() {
+    try {
+      await api('/api/auth/logout', { method: 'POST' });
+    } catch (_) {}
+    resetSensitiveState();
+    openLoginModal();
+    toast('Đã đăng xuất khỏi hệ thống.');
+  }
+
+  function openChangePassModal() {
+    $('change-pass-error').hidden = true;
+    $('cp-old-password').value = '';
+    $('cp-new-password').value = '';
+    $('cp-confirm-password').value = '';
+    try { $('change-pass-modal').showModal(); } catch (_) {}
+  }
+
+  function closeChangePassModal() {
+    try { $('change-pass-modal').close(); } catch (_) {}
+  }
+
+  async function handleChangePassword(e) {
+    e.preventDefault();
+    const old_password = $('cp-old-password').value;
+    const new_password = $('cp-new-password').value;
+    const confirm_password = $('cp-confirm-password').value;
+
+    if (new_password !== confirm_password) {
+      $('change-pass-error').textContent = 'Xác nhận mật khẩu mới không khớp.';
+      $('change-pass-error').hidden = false;
+      return;
+    }
+
+    $('change-pass-error').hidden = true;
+    $('submit-change-pass').disabled = true;
+    try {
+      await api('/api/auth/password', {
+        method: 'PUT',
+        body: JSON.stringify({ old_password, new_password }),
+      });
+      closeChangePassModal();
+      toast('Đổi mật khẩu thành công!');
+    } catch (err) {
+      $('change-pass-error').textContent = err.message;
+      $('change-pass-error').hidden = false;
+    } finally {
+      $('submit-change-pass').disabled = false;
+    }
+  }
+
+  // --- Quản lý CTV (Admin) ---
+  function formatUserDate(val) {
+    if (!val) return 'Chưa login';
+    let d;
+    if (typeof val === 'number') {
+      d = new Date(val * 1000);
+    } else {
+      d = new Date(val);
+    }
+    if (isNaN(d.getTime())) return 'Chưa login';
+    return new Intl.DateTimeFormat('vi-VN', {
+      dateStyle: 'short',
+      timeStyle: 'short',
+      timeZone: 'Asia/Ho_Chi_Minh',
+    }).format(d);
+  }
+
+  async function loadCollaborators() {
+    const listBody = $('collaborators-list');
+    listBody.innerHTML = '<tr><td colspan="4" class="text-muted">Đang tải danh sách...</td></tr>';
+    try {
+      const data = await api('/api/admin/users');
+      if (!data.users || !data.users.length) {
+        listBody.innerHTML = '<tr><td colspan="4" class="text-muted">Chưa có cộng tác viên nào.</td></tr>';
+        return;
+      }
+      listBody.innerHTML = data.users.map((u) => {
+        const lastLogin = formatUserDate(u.last_login_at);
+        const isActive = u.status === 'active';
+        return `<tr data-user-id="${u.id}" data-username="${escapeHtml(u.username)}" data-status="${u.status}">
+          <td><strong>${escapeHtml(u.username)}</strong></td>
+          <td><span class="user-status-badge is-${u.status}">${isActive ? 'HOẠT ĐỘNG' : 'ĐÃ KHÓA'}</span></td>
+          <td><small>${escapeHtml(lastLogin)}</small></td>
+          <td>
+            <div class="user-actions">
+              <button class="user-action-small" data-user-action="reset-pass" title="Đổi mật khẩu">Đổi pass</button>
+              <button class="user-action-small ${isActive ? 'danger' : ''}" data-user-action="toggle-status">
+                ${isActive ? 'Khóa' : 'Mở khóa'}
+              </button>
+            </div>
+          </td>
+        </tr>`;
+      }).join('');
+    } catch (err) {
+      listBody.innerHTML = `<tr><td colspan="4" class="auth-error">${escapeHtml(err.message)}</td></tr>`;
+    }
+  }
+
+  function openCreateUserModal() {
+    $('cu-error').hidden = true;
+    $('cu-username').value = '';
+    $('cu-password').value = '';
+    try { $('create-user-modal').showModal(); } catch (_) {}
+  }
+
+  function closeCreateUserModal() {
+    try { $('create-user-modal').close(); } catch (_) {}
+  }
+
+  async function handleCreateUser(e) {
+    e.preventDefault();
+    const username = $('cu-username').value.trim();
+    const password = $('cu-password').value;
+    $('cu-error').hidden = true;
+    $('submit-create-user').disabled = true;
+    try {
+      await api('/api/admin/users', {
+        method: 'POST',
+        body: JSON.stringify({ username, password }),
+      });
+      closeCreateUserModal();
+      toast(`Đã tạo cộng tác viên ${username}`);
+      await loadCollaborators();
+    } catch (err) {
+      $('cu-error').textContent = err.message;
+      $('cu-error').hidden = false;
+    } finally {
+      $('submit-create-user').disabled = false;
+    }
+  }
+
+  function openAdminResetPassModal(userId, username) {
+    $('arp-user-id').value = userId;
+    $('arp-subtitle').textContent = `Đặt lại mật khẩu cho tài khoản ${username}`;
+    $('arp-password').value = '';
+    $('arp-error').hidden = true;
+    try { $('admin-reset-pass-modal').showModal(); } catch (_) {}
+  }
+
+  function closeAdminResetPassModal() {
+    try { $('admin-reset-pass-modal').close(); } catch (_) {}
+  }
+
+  async function handleAdminResetPass(e) {
+    e.preventDefault();
+    const userId = $('arp-user-id').value;
+    const password = $('arp-password').value;
+    $('arp-error').hidden = true;
+    $('submit-arp').disabled = true;
+    try {
+      await api(`/api/admin/users/${userId}/password`, {
+        method: 'PUT',
+        body: JSON.stringify({ password }),
+      });
+      closeAdminResetPassModal();
+      toast('Đã cập nhật mật khẩu mới cho CTV thành công!');
+    } catch (err) {
+      $('arp-error').textContent = err.message;
+      $('arp-error').hidden = false;
+    } finally {
+      $('submit-arp').disabled = false;
+    }
+  }
+
+  async function handleToggleUserStatus(userId, currentStatus) {
+    const nextStatus = currentStatus === 'active' ? 'inactive' : 'active';
+    const actionLabel = nextStatus === 'inactive' ? 'khóa' : 'kích hoạt lại';
+    if (!confirm(`Bạn có chắc muốn ${actionLabel} tài khoản CTV này?`)) return;
+    try {
+      await api(`/api/admin/users/${userId}/status`, {
+        method: 'PUT',
+        body: JSON.stringify({ status: nextStatus }),
+      });
+      toast(`Đã ${actionLabel} tài khoản CTV.`);
+      await loadCollaborators();
+    } catch (err) {
+      toast(`Lỗi: ${err.message}`, 'error');
+    }
+  }
+
+  function hasActiveJobs() {
+    for (const job of state.jobs.values()) {
+      if (['queued', 'running'].includes(job.status)) return true;
+    }
+    return false;
+  }
+
+  function stopPollingFallback() {
+    if (state.pollTimer) {
+      clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    state.pollEpoch += 1;
+    state.isPolling = false;
+  }
+
+  function startPollingFallback() {
+    if (state.pollTimer) return;
+    if (!hasActiveJobs()) return;
+
+    state.pollTimer = setInterval(async () => {
+      if (state.isPolling) return;
+      if (!hasActiveJobs()) {
+        stopPollingFallback();
+        return;
+      }
+      const currentEpoch = state.pollEpoch;
+      state.isPolling = true;
+      try {
+        const data = await api('/api/bootstrap');
+        // Nếu trong lúc chờ response mà SSE đã hồi phục (epoch tăng), bỏ qua response này
+        if (currentEpoch !== state.pollEpoch) return;
+
+        (data.jobs || []).forEach((job) => state.jobs.set(job.id, job));
+        render();
+        if (state.selectedJob) {
+          const currentJob = state.jobs.get(state.selectedJob);
+          if (currentJob) {
+            updateInlineLogHeader(currentJob);
+            fetchActiveLogs(state.selectedJob);
+          }
+        }
+      } catch (_) {
+        // Lỗi mạng khi poll -> giữ yên và chờ lần tiếp theo
+      } finally {
+        state.isPolling = false;
+      }
+    }, 3000);
+  }
+
   function connectEvents() {
     state.events?.close();
-    state.events = new EventSource(`/api/events?token=${encodeURIComponent(state.token)}`);
-    state.events.onopen = () => { $('connection-label').textContent = 'SẴN SÀNG'; };
-    state.events.onerror = () => { $('connection-label').textContent = 'ĐANG KẾT NỐI'; };
+    state.events = new EventSource('/api/events');
+    state.events.onopen = () => {
+      $('connection-label').textContent = 'SẴN SÀNG';
+      stopPollingFallback();
+    };
+    state.events.onerror = () => {
+      $('connection-label').textContent = 'ĐANG KẾT NỐI';
+      startPollingFallback();
+    };
     state.events.onmessage = ({ data }) => {
-      const payload = JSON.parse(data);
-      if (payload.type === 'snapshot') {
-        state.jobs.clear(); payload.jobs.forEach((job) => state.jobs.set(job.id, job));
-      } else if (payload.type === 'job') state.jobs.set(payload.job.id, payload.job);
-      else if (payload.type === 'removed') state.jobs.delete(payload.id);
-      render();
-      refreshOutput();
+      try {
+        const payload = JSON.parse(data);
+        if (payload.type === 'auth_revoked') {
+          toast('Phiên đăng nhập đã kết thúc hoặc tài khoản bị khóa.', 'error');
+          resetSensitiveState();
+          openLoginModal();
+          return;
+        }
+        if (payload.type === 'snapshot') {
+          state.jobs.clear();
+          payload.jobs.forEach((job) => state.jobs.set(job.id, job));
+        } else if (payload.type === 'job') {
+          state.jobs.set(payload.job.id, payload.job);
+          if (state.selectedJob === payload.job.id) {
+            updateInlineLogHeader(payload.job);
+            const isTerminal = ['success', 'error', 'cancelled'].includes(payload.job.status);
+            refreshActiveLogDebounced(payload.job.id, 300, isTerminal);
+          }
+        } else if (payload.type === 'removed') {
+          state.jobs.delete(payload.id);
+          if (state.selectedJob === payload.id) {
+            closeInlineLog();
+          }
+        }
+        render();
+        refreshOutput();
+      } catch (err) {
+        console.error('SSE Error:', err);
+      }
     };
   }
 
   async function init() {
     try {
-      const data = await fetch('/api/bootstrap').then((response) => response.json());
-      state.token = data.token; state.settings = data.settings;
-      $('combo-input').value = String(state.settings['twofa.input_draft'] || '');
+      const data = await api('/api/bootstrap');
+      applyUserSession(data.user, data.csrf_token, data.capabilities);
+      state.settings = data.settings || {};
+      state.jobs.clear();
       data.jobs.forEach((job) => state.jobs.set(job.id, job));
-      loadSettingsForm(); updateEditor(); render(); renderOutput(); connectEvents(); await refreshOutput();
-    } catch (_) { $('connection-label').textContent = 'MẤT KẾT NỐI'; toast('Không kết nối được dịch vụ tại máy.', 'error'); }
+      loadSettingsForm();
+      updateEditor();
+      render();
+      renderOutput();
+      connectEvents();
+      await refreshOutput();
+    } catch (err) {
+      resetSensitiveState();
+      openLoginModal();
+    }
   }
 
-  $('combo-input').addEventListener('input', scheduleDraftSave);
+  // --- Listeners ---
+  $('combo-input').addEventListener('input', updateEditor);
   $('combo-input').addEventListener('scroll', () => { $('line-numbers').scrollTop = $('combo-input').scrollTop; });
   document.querySelectorAll('.mode-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -538,7 +1057,12 @@
   $('setting-proxy-pool').addEventListener('input', () => { updateProxySummary(); resetProxyTest(); });
   $('test-proxies').addEventListener('click', testProxies);
   $('launch-batch').addEventListener('click', async () => {
-    try { await saveQuickConcurrency(); openLaunchConfirmation(); } catch (error) { toast(error.message, 'error'); }
+    try {
+      if (state.user?.role === 'admin') {
+        await saveQuickConcurrency();
+      }
+      openLaunchConfirmation();
+    } catch (error) { toast(error.message, 'error'); }
   });
   $('confirm-launch').addEventListener('click', launch);
   $('cancel-launch').addEventListener('click', () => { state.pendingLaunch = null; $('launch-confirm').close(); });
@@ -551,19 +1075,103 @@
     if (row && row.dataset.id) openLogs(row.dataset.id);
   });
   $('close-inline-log').addEventListener('click', closeInlineLog);
+  $('btn-stop-inline-job')?.addEventListener('click', async () => {
+    if (!state.selectedJob) return;
+    await jobAction(state.selectedJob, 'stop');
+    const updatedJob = state.jobs.get(state.selectedJob);
+    if (updatedJob && $('btn-stop-inline-job')) {
+      $('btn-stop-inline-job').hidden = !['queued', 'running'].includes(updatedJob.status);
+      const verifyFailed = isVerifyFailure(updatedJob);
+      $('inline-log-status').innerHTML = `<span class="status ${updatedJob.status}${verifyFailed ? ' verify-failed' : ''}">${escapeHtml(statusLabel(updatedJob))}</span>${updatedJob.has_proxy ? `<span class="proxy-chip">PROXY #${updatedJob.proxy_slot} · ${escapeHtml(updatedJob.proxy_label)}</span>` : '<span class="proxy-chip direct">DIRECT</span>'}`;
+    }
+  });
   document.querySelectorAll('.filter').forEach((button) => button.addEventListener('click', () => {
     document.querySelectorAll('.filter').forEach((item) => item.classList.remove('active'));
-    button.classList.add('active'); state.filter = button.dataset.filter; render();
+    button.classList.add('active');
+    state.filter = button.dataset.filter;
+    render();
   }));
   document.querySelectorAll('[data-target]').forEach((button) => button.addEventListener('click', () => $(button.dataset.target).scrollIntoView({ behavior: 'smooth' })));
-  $('open-settings').addEventListener('click', () => { loadSettingsForm(); openDrawer('settings-drawer'); });
-  $('open-proxy-settings').addEventListener('click', () => { loadSettingsForm(); openDrawer('settings-drawer'); $('setting-proxy-pool').focus(); });
-  $('close-detail').addEventListener('click', closeDrawers); $('close-settings').addEventListener('click', closeDrawers); $('drawer-backdrop').addEventListener('click', closeDrawers);
+  $('open-settings').addEventListener('click', () => {
+    if (state.user?.role !== 'admin') return;
+    loadSettingsForm();
+    openDrawer('settings-drawer');
+  });
+  $('open-proxy-settings').addEventListener('click', () => {
+    if (state.user?.role !== 'admin') return;
+    loadSettingsForm();
+    openDrawer('settings-drawer');
+    $('setting-proxy-pool').focus();
+  });
+  $('close-detail').addEventListener('click', closeDrawers);
+  $('close-settings').addEventListener('click', closeDrawers);
+  $('close-users').addEventListener('click', closeDrawers);
+  $('drawer-backdrop').addEventListener('click', closeDrawers);
   $('settings-form').addEventListener('submit', saveSettings);
   $('copy-output').addEventListener('click', copyOutput);
   $('export-output').addEventListener('click', exportOutput);
   $('nav-output').addEventListener('click', () => $('output-panel').scrollIntoView({ behavior: 'smooth' }));
-  $('stop-all').addEventListener('click', async () => { try { await api('/api/jobs/stop-all', { method: 'POST' }); toast('Đã gửi lệnh dừng toàn bộ.'); } catch (error) { toast(error.message, 'error'); } });
-  $('clear-all').addEventListener('click', async () => { try { await api('/api/jobs', { method: 'DELETE' }); state.jobs.clear(); render(); await refreshOutput(); toast('Đã dọn danh sách.'); } catch (error) { toast(error.message, 'error'); } });
-  updateEditor(); renderOutput(); init();
+  $('stop-all').addEventListener('click', async () => {
+    try {
+      await api('/api/jobs/stop-all', { method: 'POST' });
+      toast('Đã gửi lệnh dừng toàn bộ.');
+    } catch (error) { toast(error.message, 'error'); }
+  });
+  $('clear-all').addEventListener('click', async () => {
+    try {
+      await api('/api/jobs', { method: 'DELETE' });
+      state.jobs.clear();
+      render();
+      await refreshOutput();
+      toast('Đã dọn danh sách.');
+    } catch (error) { toast(error.message, 'error'); }
+  });
+
+  // Auth & CTV Listeners
+  $('btn-login-trigger')?.addEventListener('click', openLoginModal);
+  $('close-login')?.addEventListener('click', closeLoginModal);
+  $('login-form').addEventListener('submit', handleLogin);
+  $('btn-logout').addEventListener('click', handleLogout);
+  $('btn-open-change-pass').addEventListener('click', openChangePassModal);
+  $('close-change-pass').addEventListener('click', closeChangePassModal);
+  $('cancel-change-pass').addEventListener('click', closeChangePassModal);
+  $('change-pass-form').addEventListener('submit', handleChangePassword);
+
+  const handleOpenUsers = async () => {
+    if (state.user?.role !== 'admin') return;
+    openDrawer('users-drawer');
+    await loadCollaborators();
+  };
+  $('nav-users').addEventListener('click', handleOpenUsers);
+  $('btn-open-users-pill')?.addEventListener('click', handleOpenUsers);
+  $('btn-refresh-users').addEventListener('click', loadCollaborators);
+  $('btn-open-create-user').addEventListener('click', openCreateUserModal);
+  $('close-create-user').addEventListener('click', closeCreateUserModal);
+  $('cancel-create-user').addEventListener('click', closeCreateUserModal);
+  $('create-user-form').addEventListener('submit', handleCreateUser);
+
+  $('collaborators-list').addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-user-action]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    if (!tr) return;
+    const userId = Number(tr.dataset.userId);
+    const username = tr.dataset.username;
+    const status = tr.dataset.status;
+    const action = btn.dataset.userAction;
+
+    if (action === 'reset-pass') {
+      openAdminResetPassModal(userId, username);
+    } else if (action === 'toggle-status') {
+      handleToggleUserStatus(userId, status);
+    }
+  });
+
+  $('close-arp').addEventListener('click', closeAdminResetPassModal);
+  $('cancel-arp').addEventListener('click', closeAdminResetPassModal);
+  $('arp-form').addEventListener('submit', handleAdminResetPass);
+
+  updateEditor();
+  renderOutput();
+  init();
 })();

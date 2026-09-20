@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 import certifi
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -111,6 +111,16 @@ configure_camoufox_cache(ROOT)
 
 from db import get_engine, get_repos, get_settings_repo  # noqa: E402
 from jobs import TwoFAJobManager, normalize_proxy, proxy_label  # noqa: E402
+from auth.crypto import generate_csrf_token  # noqa: E402
+from auth.dependencies import AuthContext, create_auth_dependencies, resolve_csrf_secret  # noqa: E402
+from auth.models import (  # noqa: E402
+    AdminBootstrapResponse,
+    CollaboratorBootstrapResponse,
+    CollaboratorCapabilities,
+    UserPublic,
+)
+from auth.repositories import AuditRepository, SessionRepository, UserRepository  # noqa: E402
+from auth.routes import create_auth_routers  # noqa: E402
 
 
 RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
@@ -129,7 +139,7 @@ class SettingsRequest(BaseModel):
     auto_retry_max: int = Field(ge=0, le=5)
     auto_retry_delay: float = Field(ge=0, le=60)
     change_enabled: bool
-    input_draft: str = Field(max_length=1_000_000)
+    input_draft: str = Field(default="", max_length=1_000_000)
     proxy_pool: list[str] = Field(default_factory=list, max_length=500)
 
 
@@ -140,11 +150,18 @@ class ProxyTestRequest(BaseModel):
 engine = get_engine(str(DB_PATH))
 _, job_repo, _ = get_repos(engine)
 settings_repo = get_settings_repo(engine)
-auth_token = settings_repo.get("web.auth_token")
-if not isinstance(auth_token, str) or len(auth_token) < 32:
-    auth_token = secrets.token_urlsafe(32)
-    settings_repo.set("web.auth_token", auth_token)
-manager = TwoFAJobManager(job_repo, settings_repo)
+
+user_repo = UserRepository(engine)
+session_repo = SessionRepository(engine)
+audit_repo = AuditRepository(engine)
+
+# Khởi tạo Admin ban đầu từ biến môi trường nếu DB chưa có
+user_repo.seed_admin_from_env(ROOT)
+
+csrf_secret = resolve_csrf_secret(RUNTIME_DIR)
+get_current_user, require_admin, require_csrf = create_auth_dependencies(session_repo, csrf_secret)
+
+manager = TwoFAJobManager(job_repo, settings_repo, user_repo=user_repo)
 
 
 @asynccontextmanager
@@ -160,28 +177,59 @@ app = FastAPI(
     description="Local-only Password and TOTP control plane",
     version="1.0.0",
     lifespan=lifespan,
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
-
-def require_token(x_auth_token: str | None = Header(default=None)) -> None:
-    if not x_auth_token or not secrets.compare_digest(x_auth_token, auth_token):
-        raise HTTPException(status_code=401, detail="Token không hợp lệ")
+auth_router, admin_router = create_auth_routers(
+    user_repo=user_repo,
+    session_repo=session_repo,
+    audit_repo=audit_repo,
+    manager=manager,
+    csrf_secret=csrf_secret,
+    get_current_user=get_current_user,
+    require_admin=require_admin,
+    require_csrf=require_csrf,
+)
+app.include_router(auth_router)
+app.include_router(admin_router)
 
 
 @app.get("/api/bootstrap")
-def bootstrap() -> dict[str, Any]:
-    return {
-        "brand": "Lehaipreshop",
-        "product": "Lehaipreshop",
-        "token": auth_token,
-        "jobs": manager.snapshots(),
-        "settings": manager.settings,
-    }
+async def bootstrap(actor: AuthContext = Depends(get_current_user)) -> dict[str, Any]:
+    csrf_token = generate_csrf_token(csrf_secret, actor.raw_token)
+    user_dto = UserPublic(id=actor.user_id, username=actor.username, role=actor.role, status="active")
+    if actor.is_admin:
+        return AdminBootstrapResponse(
+            brand="Lehaipreshop",
+            product="Lehaipreshop",
+            user=user_dto,
+            csrf_token=csrf_token,
+            jobs=manager.snapshots(actor),
+            settings=manager.settings,
+            capabilities={"is_admin": True, "can_configure_settings": True, "can_manage_proxies": True},
+        ).model_dump()
+    return CollaboratorBootstrapResponse(
+        brand="Lehaipreshop",
+        product="Lehaipreshop",
+        user=user_dto,
+        csrf_token=csrf_token,
+        jobs=manager.snapshots(actor),
+        capabilities=CollaboratorCapabilities(),
+    ).model_dump()
 
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
     return {"ok": True, "port": RUNTIME_PORT}
+
+
+@app.api_route("/actuator/health", methods=["GET", "HEAD"])
+@app.api_route("/actuator/health/", methods=["GET", "HEAD"])
+def actuator_health() -> dict[str, Any]:
+    """Endpoint sức khỏe công khai chuẩn Spring Boot Actuator phục vụ Render và Uptime monitoring."""
+    return {"status": "UP"}
 
 
 def _test_proxy_sync(index: int, raw_proxy: str, timeout: float = 12.0) -> dict[str, Any]:
@@ -304,7 +352,7 @@ def _test_proxy_sync(index: int, raw_proxy: str, timeout: float = 12.0) -> dict[
             pass
 
 
-@app.post("/api/proxies/test", dependencies=[Depends(require_token)])
+@app.post("/api/proxies/test", dependencies=[Depends(require_admin), Depends(require_csrf)])
 async def test_proxies(request: ProxyTestRequest) -> dict[str, Any]:
     semaphore = asyncio.Semaphore(20)
 
@@ -323,36 +371,48 @@ async def test_proxies(request: ProxyTestRequest) -> dict[str, Any]:
     }
 
 
-@app.post("/api/jobs", dependencies=[Depends(require_token)])
-def add_jobs(request: BatchRequest) -> dict[str, Any]:
+@app.post("/api/jobs", dependencies=[Depends(require_csrf)])
+async def add_jobs(
+    request: BatchRequest,
+    actor: AuthContext = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return {"jobs": manager.add(request.lines, request.mode)}
+        return {"jobs": manager.add(request.lines, request.mode, actor=actor)}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
-@app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(require_token)])
-def retry_job(job_id: str) -> dict[str, Any]:
+@app.post("/api/jobs/{job_id}/retry", dependencies=[Depends(require_csrf)])
+async def retry_job(
+    job_id: str,
+    actor: AuthContext = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return {"job": manager.retry(job_id)}
+        return {"job": manager.retry(job_id, actor=actor)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy job") from exc
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(require_token)])
-def stop_job(job_id: str) -> dict[str, Any]:
+@app.post("/api/jobs/{job_id}/stop", dependencies=[Depends(require_csrf)])
+async def stop_job(
+    job_id: str,
+    actor: AuthContext = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return {"job": manager.stop(job_id)}
+        return {"job": manager.stop(job_id, actor=actor)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy job") from exc
 
 
-@app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_token)])
-def delete_job(job_id: str) -> dict[str, bool]:
+@app.delete("/api/jobs/{job_id}", dependencies=[Depends(require_csrf)])
+async def delete_job(
+    job_id: str,
+    actor: AuthContext = Depends(get_current_user),
+) -> dict[str, bool]:
     try:
-        manager.delete(job_id)
+        manager.delete(job_id, actor=actor)
         return {"ok": True}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy job") from exc
@@ -360,31 +420,34 @@ def delete_job(job_id: str) -> dict[str, bool]:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.post("/api/jobs/stop-all", dependencies=[Depends(require_token)])
-def stop_all() -> dict[str, bool]:
-    manager.stop_all()
+@app.post("/api/jobs/stop-all", dependencies=[Depends(require_csrf)])
+async def stop_all(actor: AuthContext = Depends(get_current_user)) -> dict[str, bool]:
+    manager.stop_all(actor=actor)
     return {"ok": True}
 
 
-@app.delete("/api/jobs", dependencies=[Depends(require_token)])
-def clear_jobs() -> dict[str, int]:
+@app.delete("/api/jobs", dependencies=[Depends(require_csrf)])
+async def clear_jobs(actor: AuthContext = Depends(get_current_user)) -> dict[str, int]:
     try:
-        return {"deleted": manager.clear()}
+        return {"deleted": manager.clear(actor=actor)}
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
-@app.get("/api/jobs/{job_id}/logs", dependencies=[Depends(require_token)])
-def job_logs(job_id: str) -> dict[str, Any]:
+@app.get("/api/jobs/{job_id}/logs")
+async def job_logs(
+    job_id: str,
+    actor: AuthContext = Depends(get_current_user),
+) -> dict[str, Any]:
     try:
-        return {"logs": manager.logs(job_id)}
+        return {"logs": manager.logs(job_id, actor=actor)}
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Không tìm thấy job") from exc
 
 
-@app.get("/api/output", dependencies=[Depends(require_token)])
-def output_file() -> PlainTextResponse:
-    body = "\n".join(manager.output())
+@app.get("/api/output")
+async def output_file(actor: AuthContext = Depends(get_current_user)) -> PlainTextResponse:
+    body = "\n".join(manager.output(actor=actor))
     if body:
         body += "\n"
     return PlainTextResponse(
@@ -393,9 +456,9 @@ def output_file() -> PlainTextResponse:
     )
 
 
-@app.get("/api/output/errors", dependencies=[Depends(require_token)])
-def error_output_file() -> PlainTextResponse:
-    body = "\n".join(manager.failed_output())
+@app.get("/api/output/errors")
+async def error_output_file(actor: AuthContext = Depends(get_current_user)) -> PlainTextResponse:
+    body = "\n".join(manager.failed_output(actor=actor))
     if body:
         body += "\n"
     return PlainTextResponse(
@@ -404,7 +467,7 @@ def error_output_file() -> PlainTextResponse:
     )
 
 
-@app.put("/api/settings", dependencies=[Depends(require_token)])
+@app.put("/api/settings", dependencies=[Depends(require_admin), Depends(require_csrf)])
 async def update_settings(request: SettingsRequest) -> dict[str, Any]:
     try:
         return {"settings": await manager.update_settings({
@@ -414,7 +477,7 @@ async def update_settings(request: SettingsRequest) -> dict[str, Any]:
             "twofa.auto_retry_max": request.auto_retry_max,
             "twofa.auto_retry_delay": request.auto_retry_delay,
             "twofa.change_enabled": request.change_enabled,
-            "twofa.input_draft": request.input_draft,
+            "twofa.input_draft": "",  # Không lưu input draft để đảm bảo an toàn thông tin
             "twofa.proxy_pool": request.proxy_pool,
         })}
     except ValueError as exc:
@@ -422,24 +485,60 @@ async def update_settings(request: SettingsRequest) -> dict[str, Any]:
 
 
 @app.get("/api/events")
-async def events(token: str):
-    if not secrets.compare_digest(token, auth_token):
-        raise HTTPException(status_code=401, detail="Token không hợp lệ")
-    queue = manager.subscribe()
+async def events(request: Request):
+    raw_token = request.cookies.get("session")
+    if not raw_token:
+        raise HTTPException(status_code=401, detail="Yêu cầu đăng nhập")
+    session_info = session_repo.get_session_by_token(raw_token)
+    if not session_info:
+        raise HTTPException(status_code=401, detail="Phiên đăng nhập đã hết hạn")
+
+    actor = AuthContext(
+        user_id=session_info["user_id"],
+        username=session_info["username"],
+        role=session_info["role"],
+        session_id=session_info["session_id"],
+        raw_token=raw_token,
+    )
+    sub = manager.subscribe(actor)
 
     async def stream():
         try:
-            yield f"data: {json.dumps({'type': 'snapshot', 'jobs': manager.snapshots()})}\n\n"
+            yield f"data: {json.dumps({'type': 'snapshot', 'jobs': manager.snapshots(actor)})}\n\n"
             while True:
-                try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=15)
-                    yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
-                except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
-        finally:
-            manager.unsubscribe(queue)
+                get_task = asyncio.create_task(sub.queue.get())
+                revoked_task = asyncio.create_task(sub.revoked_event.wait())
+                done, pending = await asyncio.wait(
+                    [get_task, revoked_task],
+                    timeout=15.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for p in pending:
+                    p.cancel()
 
-    return StreamingResponse(stream(), media_type="text/event-stream")
+                if sub.revoked_event.is_set():
+                    yield f"data: {json.dumps({'type': 'auth_revoked', 'reason': 'session_terminated'})}\n\n"
+                    break
+
+                if not done:
+                    yield ": keepalive\n\n"
+                    continue
+
+                for t in done:
+                    if t is get_task and not t.cancelled():
+                        try:
+                            payload = t.result()
+                            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+                        except Exception:
+                            pass
+        finally:
+            manager.unsubscribe(sub)
+
+    return StreamingResponse(
+        stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
@@ -447,7 +546,10 @@ app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 @app.get("/")
 def index() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(
+        STATIC_DIR / "index.html",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 def _open_browser_when_ready(host: str, port: int) -> None:

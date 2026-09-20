@@ -3,7 +3,7 @@
 
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="description" content="Lehaipreshop - bộ công cụ kiểm tra và cập nhật tài khoản tại máy.">
   <meta name="theme-color" content="#0c0f0b">
   <title>DangTuanGPT</title>
@@ -12,8 +12,8 @@
   <link
     href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Manrope:wght@400;500;600;700;800&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="/assets/index.css">
-  <link rel="stylesheet" href="/assets/dashboard.css">
+  <link rel="stylesheet" href="/assets/index.css?v=18">
+  <link rel="stylesheet" href="/assets/dashboard.css?v=18">
 </head>
 
 <body>
@@ -28,6 +28,7 @@
         <button id="nav-dashboard" class="nav-icon active" data-target="top" aria-label="Dashboard">⌁</button>
         <button id="nav-queue" class="nav-icon" data-target="queue" aria-label="Hàng đợi">≋</button>
         <button id="nav-output" class="nav-icon" data-action="output" aria-label="Kết quả">↧</button>
+        <button id="nav-users" class="nav-icon" data-action="users" aria-label="Quản lý CTV" title="Quản trị CTV" hidden>👥</button>
       </nav>
       <button id="open-settings" class="nav-icon rail-bottom" aria-label="Cài đặt">⚙</button>
     </aside>
@@ -41,6 +42,22 @@
         </div>
         <div class="top-actions">
           <!-- <div class="telegram-contact"><span>Hỗ trợ</span><strong>@arjso1612</strong></div> -->
+          <button id="btn-login-trigger" class="button primary small-btn" type="button">
+            <span>Đăng nhập</span><b>→</b>
+          </button>
+          <div id="user-pill" class="user-pill" hidden>
+            <span id="user-role-badge" class="user-role-badge">ADMIN</span>
+            <span id="user-display-name" class="user-display-name">admin</span>
+            <button id="btn-open-users-pill" class="user-pill-btn" type="button" title="Quản lý Cộng tác viên" hidden>
+              <span>👥 Quản lý CTV</span>
+            </button>
+            <button id="btn-open-change-pass" class="user-pill-btn" type="button" title="Đổi mật khẩu">
+              <span>🔑 Đổi pass</span>
+            </button>
+            <button id="btn-logout" class="user-pill-btn logout" type="button" title="Đăng xuất khỏi hệ thống">
+              <span>⏻ Đăng xuất</span>
+            </button>
+          </div>
           <div class="live-pill"><i></i><span id="connection-label">SẴN SÀNG</span></div>
         </div>
       </header>
@@ -121,7 +138,7 @@
             <textarea id="success-output" wrap="off" readonly spellcheck="false"
               aria-label="Tài khoản đã đổi 2FA thành công"></textarea>
             <div id="output-empty" class="output-empty"><span>✓</span><strong>Chưa có combo hoàn tất</strong><small>Kết
-                quả đã xác minh sẽ xuất hiện ở đây.</small></div>
+                quả tài khoản LIVE hoặc đổi 2FA/mật khẩu thành công sẽ xuất hiện tại đây.</small></div>
           </div>
           <div class="output-actions">
             <button id="copy-output" class="button ghost" disabled><span>Copy tất cả</span><b>⧉</b></button>
@@ -161,6 +178,7 @@
                 <tr>
                   <th>Tài khoản · Chế độ</th>
                   <th>Trạng thái · Gói</th>
+                  <th>Bắt đầu</th>
                   <th>Kiểm tra tài khoản</th>
                   <th>Retry</th>
                   <th></th>
@@ -180,7 +198,10 @@
                 <h3 id="inline-log-title">Chi tiết</h3>
                 <div id="inline-log-status" class="inline-log-status"></div>
               </div>
-              <button id="close-inline-log" class="inline-log-close" aria-label="Đóng">×</button>
+              <div class="inline-log-actions">
+                <button id="btn-stop-inline-job" class="button danger small-btn inline-log-stop" type="button" hidden>■ Dừng job</button>
+                <button id="close-inline-log" class="inline-log-close" aria-label="Đóng">×</button>
+              </div>
             </div>
             <div id="inline-log-checkpoint" class="inline-log-checkpoint" hidden>
               <strong>2FA mới đã được lưu · Verify thất bại</strong>
@@ -264,8 +285,146 @@
     </div>
   </dialog>
 
+  <aside id="users-drawer" class="drawer users-drawer" aria-hidden="true">
+    <button id="close-users" class="drawer-close" aria-label="Đóng">×</button>
+    <span class="eyebrow">Quản trị hệ thống</span>
+    <h2>Quản lý Cộng tác viên</h2>
+    <p class="drawer-subtitle">Danh sách tài khoản CTV được phép sử dụng công cụ.</p>
+    <div class="users-drawer-tools">
+      <button id="btn-open-create-user" class="button primary small-btn" type="button">
+        <span>+ Thêm CTV mới</span>
+      </button>
+      <button id="btn-refresh-users" class="button ghost small-btn" type="button" title="Làm mới">
+        <span>↻ Tải lại</span>
+      </button>
+    </div>
+    <div class="users-table-wrap">
+      <table class="users-table">
+        <thead>
+          <tr>
+            <th>Tài khoản</th>
+            <th>Trạng thái</th>
+            <th>Lần đăng nhập cuối</th>
+            <th>Thao tác</th>
+          </tr>
+        </thead>
+        <tbody id="collaborators-list">
+          <tr><td colspan="4" class="text-muted">Đang tải danh sách...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </aside>
+
+  <!-- Modal Đăng nhập -->
+  <dialog id="login-modal" class="auth-modal" aria-labelledby="login-title">
+    <div class="auth-modal-card glass">
+      <button id="close-login" class="drawer-close" type="button" aria-label="Đóng">×</button>
+      <div class="auth-modal-head">
+        <span class="eyebrow">Lehaipreshop Security</span>
+        <h2 id="login-title">Đăng nhập tài khoản</h2>
+        <p>Vui lòng đăng nhập bằng tài khoản Quản trị viên hoặc Cộng tác viên để sử dụng công cụ.</p>
+      </div>
+      <form id="login-form">
+        <label class="auth-field">
+          <span>Tên đăng nhập</span>
+          <input id="login-username" type="text" autocomplete="username" required minlength="3" placeholder="Nhập username...">
+        </label>
+        <label class="auth-field">
+          <span>Mật khẩu</span>
+          <input id="login-password" type="password" autocomplete="current-password" required placeholder="Nhập mật khẩu...">
+        </label>
+        <div id="login-error" class="auth-error" hidden></div>
+        <button id="login-submit" class="button primary auth-btn" type="submit">
+          <span>Đăng nhập</span><b>→</b>
+        </button>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- Modal Đổi mật khẩu cá nhân -->
+  <dialog id="change-pass-modal" class="auth-modal" aria-labelledby="change-pass-title">
+    <div class="auth-modal-card glass">
+      <button id="close-change-pass" class="drawer-close" type="button" aria-label="Đóng">×</button>
+      <div class="auth-modal-head">
+        <span class="eyebrow">Bảo mật tài khoản</span>
+        <h2 id="change-pass-title">Đổi mật khẩu</h2>
+        <p>Mật khẩu mới phải có tối thiểu 4 ký tự.</p>
+      </div>
+      <form id="change-pass-form">
+        <label class="auth-field">
+          <span>Mật khẩu hiện tại</span>
+          <input id="cp-old-password" type="password" autocomplete="current-password" required placeholder="Nhập mật khẩu hiện tại...">
+        </label>
+        <label class="auth-field">
+          <span>Mật khẩu mới (≥ 4 ký tự)</span>
+          <input id="cp-new-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+        </label>
+        <label class="auth-field">
+          <span>Xác nhận mật khẩu mới</span>
+          <input id="cp-confirm-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Nhập lại mật khẩu mới...">
+        </label>
+        <div id="change-pass-error" class="auth-error" hidden></div>
+        <div class="confirm-actions">
+          <button id="cancel-change-pass" class="button ghost" type="button">Hủy</button>
+          <button id="submit-change-pass" class="button primary" type="submit">Lưu mật khẩu mới</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- Modal Thêm CTV mới (Admin) -->
+  <dialog id="create-user-modal" class="auth-modal" aria-labelledby="create-user-title">
+    <div class="auth-modal-card glass">
+      <button id="close-create-user" class="drawer-close" type="button" aria-label="Đóng">×</button>
+      <div class="auth-modal-head">
+        <span class="eyebrow">Quản trị CTV</span>
+        <h2 id="create-user-title">Thêm Cộng tác viên</h2>
+        <p>Tạo tài khoản mới cho cộng tác viên tham gia xử lý.</p>
+      </div>
+      <form id="create-user-form">
+        <label class="auth-field">
+          <span>Tên đăng nhập (3-50 ký tự: chữ thường, số, _, -)</span>
+          <input id="cu-username" type="text" autocomplete="off" required minlength="3" maxlength="50" placeholder="vd: ctv_hoang">
+        </label>
+        <label class="auth-field">
+          <span>Mật khẩu khởi tạo (≥ 4 ký tự)</span>
+          <input id="cu-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+        </label>
+        <div id="cu-error" class="auth-error" hidden></div>
+        <div class="confirm-actions">
+          <button id="cancel-create-user" class="button ghost" type="button">Hủy</button>
+          <button id="submit-create-user" class="button primary" type="submit">Tạo tài khoản</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
+  <!-- Modal Đổi mật khẩu CTV (Admin reset) -->
+  <dialog id="admin-reset-pass-modal" class="auth-modal" aria-labelledby="arp-title">
+    <div class="auth-modal-card glass">
+      <button id="close-arp" class="drawer-close" type="button" aria-label="Đóng">×</button>
+      <div class="auth-modal-head">
+        <span class="eyebrow">Quản trị CTV</span>
+        <h2 id="arp-title">Đặt lại mật khẩu CTV</h2>
+        <p id="arp-subtitle">Đặt lại mật khẩu mới cho CTV.</p>
+      </div>
+      <form id="arp-form">
+        <input type="hidden" id="arp-user-id">
+        <label class="auth-field">
+          <span>Mật khẩu mới (≥ 4 ký tự)</span>
+          <input id="arp-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+        </label>
+        <div id="arp-error" class="auth-error" hidden></div>
+        <div class="confirm-actions">
+          <button id="cancel-arp" class="button ghost" type="button">Hủy</button>
+          <button id="submit-arp" class="button primary" type="submit">Cập nhật mật khẩu</button>
+        </div>
+      </form>
+    </div>
+  </dialog>
+
   <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
-  <script src="/assets/app.js" defer></script>
+  <script src="/assets/app.js?v=18" defer></script>
 </body>
 
 </html>

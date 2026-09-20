@@ -151,6 +151,11 @@ class DatabaseEngine:
                     for stmt in stmts:
                         self._conn.execute(stmt)
 
+            # Kiểm tra foreign key trước khi commit migration
+            fk_violations = self._conn.execute("PRAGMA foreign_key_check;").fetchall()
+            if fk_violations:
+                raise SchemaError(f"Foreign key constraint violation after migration: {fk_violations}")
+
             # Ghi version mới
             self._conn.execute(
                 "INSERT OR REPLACE INTO _schema_version (version, description) VALUES (?, ?)",
