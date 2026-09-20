@@ -3008,4 +3008,9 @@ async def get_session_pure_request(
             except Exception:
                 pass
 
-    return await asyncio.to_thread(_sync)
+    thread_task = asyncio.create_task(asyncio.to_thread(_sync))
+    try:
+        return await asyncio.shield(thread_task)
+    except asyncio.CancelledError:
+        await thread_task
+        raise

@@ -269,13 +269,15 @@
     let boundCount = 0;
     let html = '';
     for (let slot = 1; slot <= concurrency; slot++) {
-      const boundVal = currentBindings[String(slot)] || currentBindings[slot] || slot;
+      const boundVal = currentBindings[String(slot)] || currentBindings[slot];
       const options = lines.map((line, idx) => {
         const slotIdx = idx + 1;
-        const isSelected = String(boundVal) === String(slotIdx) || boundVal === line;
+        const isSelected = boundVal === line
+          || String(boundVal) === String(slotIdx)
+          || (!boundVal && idx === (slot - 1));
         if (isSelected) boundCount++;
         const safeHostPort = cleanProxyLabel(line);
-        return `<option value="${slotIdx}" ${isSelected ? 'selected' : ''}>Proxy #${slotIdx} · ${escapeHtml(safeHostPort)}</option>`;
+        return `<option value="${escapeHtml(line)}" ${isSelected ? 'selected' : ''}>Proxy #${slotIdx} · ${escapeHtml(safeHostPort)}</option>`;
       }).join('');
 
       html += `
@@ -288,26 +290,45 @@
       `;
     }
     list.innerHTML = html;
-    if (statusText) {
-      statusText.textContent = `${Math.min(boundCount, concurrency)}/${concurrency} luồng đã gán`;
-    }
+
+    const validateBindingsInline = () => {
+      const selects = list.querySelectorAll('.worker-binding-select');
+      const seen = new Set();
+      let hasDup = false;
+      selects.forEach((sel) => {
+        if (seen.has(sel.value)) {
+          hasDup = true;
+          sel.style.borderColor = 'var(--danger)';
+        } else {
+          seen.add(sel.value);
+          sel.style.borderColor = '';
+        }
+      });
+      if (statusText) {
+        if (lines.length < concurrency) {
+          statusText.innerHTML = '<span style="color:var(--danger)">⚠️ Cần thêm proxy cho đủ luồng</span>';
+        } else if (hasDup) {
+          statusText.innerHTML = '<span style="color:var(--danger)">⚠️ Trùng proxy giữa các luồng</span>';
+        } else {
+          statusText.textContent = `${selects.length}/${concurrency} luồng đã gán`;
+        }
+      }
+    };
 
     // Lắng nghe thay đổi chọn proxy của từng luồng
     list.querySelectorAll('.worker-binding-select').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        if (statusText) {
-          statusText.textContent = `${concurrency}/${concurrency} luồng đã gán`;
-        }
-      });
+      sel.addEventListener('change', validateBindingsInline);
     });
+    validateBindingsInline();
   }
 
   function collectWorkerBindings() {
-    const bindings = {};
+    // Bảo lưu các binding cũ (kể cả slot inactive > concurrency)
+    const bindings = { ...proxyBindings() };
     const selects = document.querySelectorAll('.worker-binding-select');
     selects.forEach((sel) => {
       const slot = sel.dataset.slot;
-      if (slot) bindings[slot] = Number(sel.value) || sel.value;
+      if (slot) bindings[slot] = sel.value;
     });
     return bindings;
   }
@@ -1264,10 +1285,27 @@
   $('export-output').addEventListener('click', exportOutput);
   $('nav-output').addEventListener('click', () => $('output-panel').scrollIntoView({ behavior: 'smooth' }));
   $('stop-all').addEventListener('click', async () => {
+    const stopBtn = $('stop-all');
+    const clearBtn = $('clear-all');
+    const originalText = stopBtn.textContent;
+    let stoppedSafely = false;
     try {
-      await api('/api/jobs/stop-all', { method: 'POST' });
-      toast('Đã gửi lệnh dừng toàn bộ.');
-    } catch (error) { toast(error.message, 'error'); }
+      stopBtn.disabled = true;
+      stopBtn.textContent = '⏳ Đang dừng...';
+      if (clearBtn) clearBtn.disabled = true;
+      const res = await api('/api/jobs/stop-all', { method: 'POST' });
+      stoppedSafely = Boolean(res && res.ok === true);
+      if (stoppedSafely) {
+        toast('Đã dừng toàn bộ các luồng an toàn.');
+      }
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      stopBtn.disabled = false;
+      stopBtn.textContent = originalText;
+      if (clearBtn) clearBtn.disabled = !stoppedSafely;
+      render();
+    }
   });
   $('clear-all').addEventListener('click', async () => {
     try {

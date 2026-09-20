@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import random
@@ -98,6 +99,132 @@ def normalize_proxy_pool(proxies: Any) -> list[str]:
         seen.add(proxy)
         normalized.append(proxy)
     return normalized
+
+
+def compute_proxy_id(normalized_url: str) -> str:
+    """Sinh Stable ID 64-bit từ URL proxy đã chuẩn hóa: px_<16 ký tự hex đầu của SHA-256>."""
+    raw = str(normalized_url or "").strip().encode("utf-8")
+    digest = hashlib.sha256(raw).hexdigest()[:16]
+    return f"px_{digest}"
+
+
+def mask_proxy_label(normalized_url: str) -> str:
+    """Tạo nhãn hiển thị an toàn, ẩn credential nhạy cảm."""
+    try:
+        parsed = urlsplit(normalized_url)
+        scheme = (parsed.scheme or "HTTP").upper()
+        host = parsed.hostname or "proxy"
+        port = parsed.port or ""
+        return f"{scheme} · {host}:{port}"
+    except Exception:
+        return normalized_url[:24]
+
+
+def build_proxy_catalog(normalized_proxies: list[str]) -> list[dict[str, Any]]:
+    """Tạo catalog proxy chuẩn với stable ID và masked label."""
+    catalog: list[dict[str, Any]] = []
+    for idx, p in enumerate(normalized_proxies, start=1):
+        px_id = compute_proxy_id(p)
+        catalog.append({
+            "id": px_id,
+            "index": idx,
+            "url": p,
+            "label": f"#{idx} · {mask_proxy_label(p)}",
+        })
+    return catalog
+
+
+def canonicalize_bindings(raw_bindings: dict[str, Any], catalog: list[dict[str, Any]]) -> dict[str, str]:
+    """
+    Quy tắc giải quyết binding tường minh:
+    1. Số nguyên hoặc string số: legacy index (1-based) -> catalog[index-1]['id'].
+    2. Chuỗi px_...: kiểm tra khớp entry['id'] trong catalog.
+    3. URL: normalize rồi so sánh chính xác (==) với entry['url'] -> entry['id'].
+    Trả về dict chuẩn hóa: {str(slot): px_id}.
+    """
+    if not isinstance(raw_bindings, dict):
+        return {}
+    catalog_by_id = {item["id"]: item for item in catalog}
+    catalog_by_url = {item["url"]: item for item in catalog}
+    canonical: dict[str, str] = {}
+
+    for raw_slot, raw_val in raw_bindings.items():
+        slot_str = str(raw_slot).strip()
+        if not slot_str.isdigit():
+            continue
+
+        resolved_id: str | None = None
+        # Case 1: Legacy index 1-based (int hoặc string số)
+        if isinstance(raw_val, int) or (isinstance(raw_val, str) and raw_val.isdigit()):
+            idx = int(raw_val) - 1
+            if 0 <= idx < len(catalog):
+                resolved_id = catalog[idx]["id"]
+        # Case 2: px_<hash> ID
+        elif isinstance(raw_val, str) and raw_val.startswith("px_"):
+            if raw_val in catalog_by_id:
+                resolved_id = raw_val
+            else:
+                # Nếu không có trong catalog hiện tại (ví dụ slot inactive), vẫn giữ nguyên ID
+                resolved_id = raw_val
+        # Case 3: URL thô
+        elif isinstance(raw_val, str):
+            try:
+                norm_url = normalize_proxy(raw_val)
+                if norm_url in catalog_by_url:
+                    resolved_id = catalog_by_url[norm_url]["id"]
+            except ValueError:
+                pass
+
+        if resolved_id:
+            canonical[slot_str] = resolved_id
+        elif isinstance(raw_val, (str, int)):
+            canonical[slot_str] = str(raw_val)
+
+    return canonical
+
+
+def _validate_routing_settings(settings: dict[str, Any]) -> None:
+    """Fail-closed validation cho cấu hình proxy routing và concurrency."""
+    mode = str(settings.get("twofa.proxy_mode") or "random_per_account")
+    if mode not in {"random_per_account", "manual_per_worker"}:
+        raise ValueError(f"Chế độ proxy không hợp lệ: {mode}. Phải là 'random_per_account' hoặc 'manual_per_worker'")
+
+    try:
+        concurrency = int(settings.get("twofa.max_concurrent") or 1)
+    except (ValueError, TypeError):
+        raise ValueError("Số luồng max_concurrent không hợp lệ")
+
+    pool = settings.get("twofa.proxy_pool") or []
+    if mode == "manual_per_worker" and pool:
+        catalog = build_proxy_catalog(pool)
+        if len(pool) < concurrency:
+            raise ValueError(
+                f"Số lượng proxy trong danh sách ({len(pool)}) ít hơn số luồng hoạt động ({concurrency}). "
+                f"Vui lòng bổ sung thêm proxy hoặc giảm số luồng."
+            )
+        bindings = settings.get("twofa.proxy_bindings") or {}
+        valid_ids = {item["id"] for item in catalog}
+
+        active_assigned: list[str] = []
+        for slot in range(1, concurrency + 1):
+            slot_str = str(slot)
+            assigned_id = bindings.get(slot_str)
+            if not assigned_id:
+                raise ValueError(f"Luồng #{slot} chưa được gán proxy cố định trong Cài đặt")
+            if assigned_id not in valid_ids:
+                raise ValueError(
+                    f"Proxy đã gán cho Luồng #{slot} (ID: {assigned_id}) không tồn tại trong danh sách proxy hiện tại"
+                )
+            active_assigned.append(assigned_id)
+
+        # Unique 1-1 constraint giữa các active slots
+        seen: set[str] = set()
+        for slot_idx, pid in enumerate(active_assigned, start=1):
+            if pid in seen:
+                raise ValueError(
+                    f"Không thể gán cùng một proxy cho nhiều luồng khác nhau (phát hiện trùng tại Luồng #{slot_idx})"
+                )
+            seen.add(pid)
 
 
 def proxy_label(proxy: str | None) -> str:
@@ -202,17 +329,25 @@ class TwoFAJobManager:
         "twofa.proxy_bindings": {},
     }
 
-    def __init__(self, job_repo, settings_repo, service: TwoFAService | None = None, user_repo: Any = None) -> None:
+    def __init__(
+        self,
+        job_repo,
+        settings_repo,
+        service: TwoFAService | None = None,
+        user_repo: Any = None,
+        rng: random.Random | None = None,
+    ) -> None:
         self.job_repo = job_repo
         self.settings_repo = settings_repo
         self.user_repo = user_repo
         self.service = service or TwoFAService()
+        self.rng = rng or random.Random()
         self.jobs: dict[str, TwoFAJob] = {}
         self.order: list[str] = []
         self._queues_by_user: dict[int | None, asyncio.Queue[str]] = collections.defaultdict(asyncio.Queue)
         self._ready_users: collections.deque[int | None] = collections.deque()
         self._running_by_user: collections.defaultdict[int | None, int] = collections.defaultdict(int)
-        self._workers: list[asyncio.Task] = []
+        self._workers: dict[int, asyncio.Task] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._retire_lock = asyncio.Lock()
         self._scheduler_lock = asyncio.Lock()
@@ -238,6 +373,10 @@ class TwoFAJobManager:
     def _load_settings(self) -> None:
         stored = self.settings_repo.list("twofa")
         self.settings.update({key: value for key, value in stored.items() if key in self.DEFAULTS})
+        proxies = self.settings.get("twofa.proxy_pool") or []
+        catalog = build_proxy_catalog(proxies)
+        raw_bindings = self.settings.get("twofa.proxy_bindings") or {}
+        self.settings["twofa.proxy_bindings"] = canonicalize_bindings(raw_bindings, catalog)
 
     @staticmethod
     def parse_combo(line: str) -> tuple[str, str, str]:
@@ -338,36 +477,40 @@ class TwoFAJobManager:
                 self._enqueue_job(job)
         self._spawn_workers(int(self.settings["twofa.max_concurrent"]))
 
-    def _active_workers(self) -> list[asyncio.Task]:
-        self._workers[:] = [task for task in self._workers if not task.done()]
+    def _active_workers(self) -> dict[int, asyncio.Task]:
+        self._workers = {slot: task for slot, task in self._workers.items() if not task.done()}
         return self._workers
 
     def _spawn_workers(self, target: int) -> None:
-        workers = self._active_workers()
-        for slot in range(len(workers) + 1, target + 1):
-            task = asyncio.create_task(self._worker(slot))
-            workers.append(task)
+        self._active_workers()
+        for slot in range(1, target + 1):
+            if slot not in self._workers or self._workers[slot].done():
+                self._workers[slot] = asyncio.create_task(self._worker(slot))
 
     async def _claim_retirement(self) -> bool:
         async with self._retire_lock:
-            workers = self._active_workers()
-            target = int(self.settings["twofa.max_concurrent"])
+            target = int(self.settings.get("twofa.max_concurrent") or 1)
+            active = self._active_workers()
             current = asyncio.current_task()
-            if len(workers) <= target or current not in workers:
+            if len(active) <= target:
                 return False
-            workers.remove(current)
-            return True
+            for slot, task in list(active.items()):
+                if task == current:
+                    self._workers.pop(slot, None)
+                    return True
+            return False
 
     async def _resize_workers(self, previous: int, target: int) -> None:
-        workers = self._active_workers()
-        if target > len(workers):
+        if target > previous:
             self._spawn_workers(target)
-            return
+        else:
+            # Slot > target sẽ tự động kết thúc ở chu kỳ tiếp theo (graceful retirement)
+            self._active_workers()
 
     async def shutdown(self) -> None:
-        for task in list(self._tasks.values()) + self._workers:
+        for task in list(self._tasks.values()) + list(self._workers.values()):
             task.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
+        await asyncio.gather(*self._workers.values(), return_exceptions=True)
         self._workers.clear()
 
     def add(self, lines: list[str], mode: str = "change_2fa", actor: AuthContext | None = None) -> list[dict[str, Any]]:
@@ -401,19 +544,16 @@ class TwoFAJobManager:
 
         created: list[dict[str, Any]] = []
         for index, (email, password, secret) in enumerate(parsed_lines):
-            if proxies:
-                proxy_index = index % len(proxies)
-                proxy_slot, assigned_proxy = proxy_index + 1, proxies[proxy_index]
-            else:
-                proxy_slot, assigned_proxy = None, None
+            # Không cấp phát tĩnh tại thời điểm add. Cấp phát hoàn toàn tại runtime.
             job = TwoFAJob(
                 id=uuid.uuid4().hex,
                 email=email,
                 password=password,
                 secret=secret,
-                proxy=assigned_proxy,
-                proxy_slot=proxy_slot,
+                proxy=None,
+                proxy_slot=None,
                 proxy_mode=proxy_mode,
+                worker_slot=None,
                 mode=mode,
                 owner_user_id=owner_uid,
             )
@@ -442,8 +582,8 @@ class TwoFAJobManager:
             self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
         return created
 
-    async def _pick_next_job_id(self) -> tuple[str | None, int | None]:
-        """Chọn job tiếp theo theo cơ chế Round-Robin users với per-user running cap = 2."""
+    async def _pick_next_job_id(self, slot_id: int) -> tuple[str | None, int | None]:
+        """Chọn job tiếp theo theo cơ chế Round-Robin users, per-user running cap = 2, và Worker Affinity chống Starvation."""
         async with self._scheduler_lock:
             if not self._ready_users:
                 return None, None
@@ -459,22 +599,45 @@ class TwoFAJobManager:
                     self._ready_users.append(uid)
                     continue
 
-                try:
-                    job_id = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    continue
+                found_job_id: str | None = None
+                size = queue.qsize()
+                for _ in range(size):
+                    try:
+                        candidate_id = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
+                    candidate_job = self.jobs.get(candidate_id)
+                    if not candidate_job or candidate_job.status != "queued":
+                        continue
+
+                    # Affinity check: job chưa gán slot (None) hoặc khớp đúng slot_id này
+                    if candidate_job.worker_slot is None or candidate_job.worker_slot == slot_id:
+                        found_job_id = candidate_id
+                        break
+                    else:
+                        # Job hợp lệ nhưng dành cho slot khác -> đưa lại cuối queue của user để bảo toàn FIFO
+                        queue.put_nowait(candidate_id)
 
                 if not queue.empty():
                     self._ready_users.append(uid)
 
-                return job_id, uid
+                if found_job_id:
+                    return found_job_id, uid
 
             return None, None
 
     async def _worker(self, slot_id: int) -> None:
         last_proxy: str | None = None
         while True:
-            job_id, uid = await self._pick_next_job_id()
+            # 1. Graceful retirement khi giảm concurrency
+            target_concurrent = int(self.settings.get("twofa.max_concurrent") or 1)
+            if slot_id > target_concurrent:
+                logger.info("Worker slot #%d retiring gracefully (concurrency downscaled to %d)", slot_id, target_concurrent)
+                self._workers.pop(slot_id, None)
+                break
+
+            job_id, uid = await self._pick_next_job_id(slot_id)
             if not job_id:
                 await asyncio.sleep(0.25)
                 continue
@@ -612,32 +775,30 @@ class TwoFAJobManager:
                 if item.id != job.id and item.status == "running" and item.proxy
             }
             cooldowns = self._active_proxy_cooldowns()
+            catalog = build_proxy_catalog(proxies)
 
             if mode == "manual_per_worker":
                 bindings = self.settings.get("twofa.proxy_bindings") or {}
-                raw_binding = bindings.get(str(slot_id))
-                if raw_binding is None:
+                assigned_id = bindings.get(str(slot_id))
+                if not assigned_id:
                     raise ValueError(f"Luồng #{slot_id} chưa được gán proxy cố định trong Cài đặt")
 
-                target_proxy = None
-                target_idx = None
-                if isinstance(raw_binding, int) or (isinstance(raw_binding, str) and raw_binding.isdigit()):
-                    idx = int(raw_binding) - 1
-                    if 0 <= idx < len(proxies):
-                        target_idx = idx + 1
-                        target_proxy = proxies[idx]
-                elif isinstance(raw_binding, str):
-                    for i, p in enumerate(proxies):
-                        if p == raw_binding or raw_binding in p:
-                            target_idx = i + 1
-                            target_proxy = p
-                            break
-                if not target_proxy:
-                    raise ValueError(f"Proxy đã gán cho Luồng #{slot_id} không tồn tại trong danh sách proxy")
+                matched = next((e for e in catalog if e["id"] == assigned_id), None)
+                if not matched:
+                    # Fallback qua canonicalize nếu là URL hoặc legacy index
+                    canon = canonicalize_bindings({str(slot_id): assigned_id}, catalog)
+                    canon_id = canon.get(str(slot_id))
+                    matched = next((e for e in catalog if e["id"] == canon_id), None)
+
+                if not matched:
+                    raise ValueError(f"Proxy đã gán cho Luồng #{slot_id} không tồn tại trong danh sách proxy hiện tại")
+
+                target_proxy = matched["url"]
+                target_idx = matched["index"]
 
                 if target_proxy in active or target_proxy in cooldowns:
                     if not notified_waiting and log_fn:
-                        log_fn(f"[chờ proxy] Luồng #{slot_id} đang chờ proxy đã gán (Proxy #{target_idx}) rảnh...")
+                        log_fn(f"[chờ proxy] Luồng #{slot_id} đang chờ proxy đã gán (Proxy #{target_idx}) rảnh hoặc hết cooldown...")
                         notified_waiting = True
                 else:
                     job.proxy = target_proxy
@@ -649,9 +810,10 @@ class TwoFAJobManager:
                 candidates = [p for p in proxies if p not in blocked]
                 if candidates:
                     if len(candidates) >= 2 and last_proxy in candidates:
-                        chosen = random.choice([p for p in candidates if p != last_proxy])
+                        pool_to_pick = [p for p in candidates if p != last_proxy]
                     else:
-                        chosen = random.choice(candidates)
+                        pool_to_pick = candidates
+                    chosen = self.rng.choice(pool_to_pick)
                     job.proxy = chosen
                     job.proxy_slot = proxies.index(chosen) + 1
                     return
@@ -695,6 +857,8 @@ class TwoFAJobManager:
             stamped = f"{time.strftime('%H:%M:%S')}  {safe[:500]}"
             job.logs.append(stamped)
             job.logs[:] = job.logs[-300:]
+            if job.id not in self.jobs:
+                return
             try:
                 self.job_repo.append_log(job.id, stamped)
             except Exception as e:
@@ -839,6 +1003,8 @@ class TwoFAJobManager:
             job.status = "cancelled"
             job.error = "Đã dừng bởi người dùng"
             job.finished_at = time.time()
+            if job.id not in self.jobs:
+                return
             try:
                 self.job_repo.update_status(
                     job.id, "cancelled", error=job.error,
@@ -894,19 +1060,18 @@ class TwoFAJobManager:
                 self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
                 return job.snapshot()
 
-        proxies = normalize_proxy_pool(self.settings.get("twofa.proxy_pool") or [])
         if job.status == "error" and job.proxy:
             job.last_failed_proxy = job.proxy
-            self._mark_proxy_failed(job.proxy)
-            job.proxy = None
-            job.proxy_slot = None
-        elif job.proxy:
-            if job.proxy in proxies:
-                job.proxy_slot = proxies.index(job.proxy) + 1
-        if proxies and not job.proxy:
-            selected = self._pick_available_proxy(job, proxies)
-            if selected:
-                job.proxy_slot, job.proxy = selected
+            if job.error_kind == "technical_error":
+                self._mark_proxy_failed(job.proxy)
+        job.proxy = None
+        job.proxy_slot = None
+
+        # Trong manual mode: giữ nguyên worker_slot để duy trì worker affinity
+        # Trong random mode: reset worker_slot = None để bất kỳ worker nào cũng có thể nhận
+        if job.proxy_mode != "manual_per_worker":
+            job.worker_slot = None
+
         job.retry_count += 1
         job.status = "queued"
         job.error = None
@@ -936,24 +1101,30 @@ class TwoFAJobManager:
             self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
         return job.snapshot()
 
-    def stop_all(self, actor: AuthContext) -> None:
+    async def stop_all(self, actor: AuthContext) -> None:
         target_jobs = [
             j for j in self.jobs.values()
             if (actor.is_admin or j.owner_user_id == actor.user_id)
             and j.status in {"queued", "running"}
         ]
+        pending_tasks = []
         for job in target_jobs:
-            task = self._tasks.get(job.id)
-            if task and not task.done():
-                task.cancel()
-            job.status = "cancelled"
-            job.error = "Đã dừng bởi người dùng"
-            job.finished_at = time.time()
-            self.job_repo.update_status(
-                job.id, "cancelled", error=job.error,
-                secret=job.secret, account_check=self._state(job),
-            )
-            self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+            if job.status == "queued":
+                job.status = "cancelled"
+                job.error = "Đã dừng bởi người dùng"
+                job.finished_at = time.time()
+                self.job_repo.update_status(
+                    job.id, "cancelled", error=job.error,
+                    secret=job.secret, account_check=self._state(job),
+                )
+                self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+            elif job.status == "running":
+                task = self._tasks.get(job.id)
+                if task and not task.done():
+                    task.cancel()
+                    pending_tasks.append(task)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     async def stop_all_for_user(self, user_id: int) -> None:
         """Dừng tất cả job của user_id khi Admin vô hiệu hóa tài khoản."""
@@ -961,15 +1132,20 @@ class TwoFAJobManager:
             j for j in self.jobs.values()
             if j.owner_user_id == user_id and j.status in {"queued", "running"}
         ]
+        pending_tasks = []
         for job in target_jobs:
-            task = self._tasks.get(job.id)
-            if task:
-                task.cancel()
-            elif job.status == "queued":
+            if job.status == "queued":
                 job.status = "cancelled"
                 job.error = "Tài khoản bị vô hiệu hóa bởi Quản trị viên"
                 self.job_repo.update_status(job.id, "cancelled", error=job.error)
                 self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
+            elif job.status == "running":
+                task = self._tasks.get(job.id)
+                if task and not task.done():
+                    task.cancel()
+                    pending_tasks.append(task)
+        if pending_tasks:
+            await asyncio.gather(*pending_tasks, return_exceptions=True)
 
     def delete(self, job_id: str, actor: AuthContext) -> None:
         job = self._require_access(job_id, actor)
@@ -984,10 +1160,32 @@ class TwoFAJobManager:
         if owner_uid is not None:
             self._broadcast_admin(payload)
 
+    def _drain_user_queue(self, user_id: int | None = None) -> None:
+        if user_id is None:
+            for q in self._queues_by_user.values():
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+            self._ready_users.clear()
+        else:
+            q = self._queues_by_user.get(user_id)
+            if q:
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+            self._ready_users = collections.deque([u for u in self._ready_users if u != user_id])
+
     def clear(self, actor: AuthContext) -> int:
         if actor.is_admin:
+            if any(not t.done() for t in self._tasks.values()):
+                raise ValueError("Các luồng đang trong quá trình dừng hẳn, vui lòng đợi giây lát.")
             if any(job.status not in TERMINAL for job in self.jobs.values()):
                 raise ValueError("Hãy dừng toàn bộ job trước khi dọn danh sách")
+            self._drain_user_queue(None)
             count = self.job_repo.delete_all(JOB_TYPE)
             self.jobs.clear()
             self.order.clear()
@@ -998,8 +1196,12 @@ class TwoFAJobManager:
                 j for j in self.jobs.values()
                 if j.owner_user_id == actor.user_id
             ]
+            user_job_ids = {j.id for j in user_jobs}
+            if any(not t.done() for jid, t in self._tasks.items() if jid in user_job_ids):
+                raise ValueError("Các luồng của bạn đang dừng, vui lòng đợi giây lát.")
             if any(j.status not in TERMINAL for j in user_jobs):
                 raise ValueError("Hãy dừng các job của bạn trước khi dọn danh sách")
+            self._drain_user_queue(actor.user_id)
             count = 0
             for j in user_jobs:
                 self.job_repo.delete(j.id)
@@ -1058,17 +1260,38 @@ class TwoFAJobManager:
         if active_jobs and any(k in values and values[k] != self.settings.get(k) for k in routing_keys):
             raise ValueError("Không thể thay đổi cấu hình proxy hoặc số luồng khi đang có tác vụ chạy hoặc chờ. Vui lòng hoàn tất hoặc dừng batch trước.")
 
-        previous = int(self.settings["twofa.max_concurrent"])
+        # 1. Chuẩn bị candidate settings copy từ current
+        candidate = dict(self.settings)
         for key, value in values.items():
             if key not in self.DEFAULTS:
                 raise ValueError(f"Setting không hỗ trợ: {key}")
             if key == "twofa.proxy_pool":
                 value = normalize_proxy_pool(value)
-            self.settings_repo.set(key, value)
-            self.settings[key] = value
-        target = int(self.settings["twofa.max_concurrent"])
-        if target != previous:
-            await self._resize_workers(previous, target)
+            candidate[key] = value
+
+        # 2. Canonicalize bindings
+        proxies = candidate.get("twofa.proxy_pool") or []
+        catalog = build_proxy_catalog(proxies)
+        raw_bindings = candidate.get("twofa.proxy_bindings") or {}
+        candidate["twofa.proxy_bindings"] = canonicalize_bindings(raw_bindings, catalog)
+
+        # 3. Cross-field validation (Fail-Closed)
+        _validate_routing_settings(candidate)
+
+        # 4. Atomic DB write: bulk_set
+        previous_target = int(self.settings["twofa.max_concurrent"])
+        diff = {k: candidate[k] for k in values.keys()}
+        diff["twofa.proxy_bindings"] = candidate["twofa.proxy_bindings"]
+        self.settings_repo.bulk_set(diff)
+
+        # 5. Commit RAM chỉ khi DB thành công
+        self.settings = candidate
+
+        # 6. Resize worker
+        new_target = int(self.settings["twofa.max_concurrent"])
+        if new_target != previous_target:
+            await self._resize_workers(previous_target, new_target)
+
         return dict(self.settings)
 
     def subscribe(self, actor: AuthContext) -> Subscriber:
@@ -1099,9 +1322,13 @@ class TwoFAJobManager:
 
     def _broadcast(self, job: TwoFAJob) -> None:
         """Phát sự kiện cập nhật job snapshot đến đúng đối tượng theo phân quyền."""
+        if job.id not in self.jobs:
+            return
         self._broadcast_job(job, {"type": "job", "job": job.snapshot()})
 
     def _broadcast_job(self, job: TwoFAJob, payload: dict[str, Any]) -> None:
+        if job.id not in self.jobs and payload.get("type") != "removed":
+            return
         for sub in list(self._subscribers):
             if sub.is_admin or (job.owner_user_id is not None and sub.user_id == job.owner_user_id):
                 self._send_sub(sub, payload)
