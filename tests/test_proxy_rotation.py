@@ -30,6 +30,9 @@ class FakeSettingsRepository:
     def list(self, _prefix):
         return dict(self.values)
 
+    def set(self, key, value):
+        self.values[key] = value
+
 
 class ProxyRotationTests(unittest.TestCase):
     def test_fifteen_accounts_rotate_across_ten_proxies(self):
@@ -97,6 +100,41 @@ class ProxyRotationTests(unittest.TestCase):
         self.assertEqual(retried["status"], "queued")
         self.assertFalse(retried["has_proxy"])
         self.assertIsNone(manager._pick_available_proxy(failed, proxies))
+
+    def test_random_strategy_assigns_at_runtime_from_available_proxies(self):
+        proxies = [f"http://127.0.0.1:{port}" for port in range(8001, 8004)]
+        manager = TwoFAJobManager(
+            FakeJobRepository(),
+            FakeSettingsRepository({
+                "twofa.proxy_pool": proxies,
+                "twofa.proxy_strategy": "random",
+            }),
+        )
+        snapshots = manager.add([
+            "candidate@example.com|password|JBSWY3DPEHPK3PXP",
+            "running@example.com|password|JBSWY3DPEHPK3PXP",
+        ])
+        candidate = manager.jobs[snapshots[0]["id"]]
+        running = manager.jobs[snapshots[1]["id"]]
+
+        self.assertFalse(snapshots[0]["has_proxy"])
+        running.status = "running"
+        running.proxy = proxies[0]
+        running.proxy_slot = 1
+        manager._proxy_cooldowns[proxies[1]] = 9999999999.0
+
+        with patch("jobs._PROXY_RANDOM.choice", return_value=(3, proxies[2])) as choice:
+            selected = manager._pick_available_proxy(candidate, proxies)
+
+        self.assertEqual(selected, (3, proxies[2]))
+        choice.assert_called_once_with([(3, proxies[2])])
+
+    def test_invalid_proxy_strategy_is_rejected(self):
+        manager = TwoFAJobManager(FakeJobRepository(), FakeSettingsRepository({}))
+
+        with self.assertRaisesRegex(ValueError, "Chiến lược proxy"):
+            import asyncio
+            asyncio.run(manager.update_settings({"twofa.proxy_strategy": "unknown"}))
 
     def test_proxy_check_reads_current_ip_without_calling_chatgpt(self):
         response = Mock(
