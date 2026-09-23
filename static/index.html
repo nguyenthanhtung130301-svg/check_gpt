@@ -3,7 +3,8 @@
 
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="viewport"
+    content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="description" content="Lehaipreshop - bộ công cụ kiểm tra và cập nhật tài khoản tại máy.">
   <meta name="theme-color" content="#0c0f0b">
   <title>DangTuanGPT</title>
@@ -21,14 +22,15 @@
   <div class="ambient ambient-b"></div>
   <div class="app-shell">
     <aside class="rail" aria-label="Điều hướng">
-      <a class="brand-orb" href="#top" aria-label="Lehaipreshop">
-        <img src="/assets/lehaipreshop-logo.jpg" alt="Logo Lehaipreshop">
+      <a class="brand-orb" href="#top" aria-label="">
+        <img src="/assets/-logo.jpg" alt="Logo ">
       </a>
       <nav>
         <button id="nav-dashboard" class="nav-icon active" data-target="top" aria-label="Dashboard">⌁</button>
         <button id="nav-queue" class="nav-icon" data-target="queue" aria-label="Hàng đợi">≋</button>
         <button id="nav-output" class="nav-icon" data-action="output" aria-label="Kết quả">↧</button>
-        <button id="nav-users" class="nav-icon" data-action="users" aria-label="Quản lý CTV" title="Quản trị CTV" hidden>👥</button>
+        <button id="nav-users" class="nav-icon" data-action="users" aria-label="Quản lý CTV" title="Quản trị CTV"
+          hidden>👥</button>
       </nav>
       <button id="open-settings" class="nav-icon rail-bottom" aria-label="Cài đặt">⚙</button>
     </aside>
@@ -41,7 +43,7 @@
           <p>Bộ công cụ riêng để kiểm tra và cập nhật tài khoản ngay trên máy.</p>
         </div>
         <div class="top-actions">
-          <!-- <div class="telegram-contact"><span>Hỗ trợ</span><strong>@arjso1612</strong></div> -->
+
           <button id="btn-login-trigger" class="button primary small-btn" type="button">
             <span>Đăng nhập</span><b>→</b>
           </button>
@@ -199,7 +201,8 @@
                 <div id="inline-log-status" class="inline-log-status"></div>
               </div>
               <div class="inline-log-actions">
-                <button id="btn-stop-inline-job" class="button danger small-btn inline-log-stop" type="button" hidden>■ Dừng job</button>
+                <button id="btn-stop-inline-job" class="button danger small-btn inline-log-stop" type="button" hidden>■
+                  Dừng job</button>
                 <button id="close-inline-log" class="inline-log-close" aria-label="Đóng">×</button>
               </div>
             </div>
@@ -213,7 +216,7 @@
         </div>
       </section>
 
-      <footer><span>DangTuan</span><i></i><span>WORKSPACE RIÊNG</span><b>@arjso1612</b></footer>
+      <footer><span>DangTuan</span><i></i><span>WORKSPACE RIÊNG</span><b>@dangtuan</b></footer>
     </main>
   </div>
 
@@ -326,7 +329,9 @@
           </tr>
         </thead>
         <tbody id="collaborators-list">
-          <tr><td colspan="4" class="text-muted">Đang tải danh sách...</td></tr>
+          <tr>
+            <td colspan="4" class="text-muted">Đang tải danh sách...</td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -337,18 +342,20 @@
     <div class="auth-modal-card glass">
       <button id="close-login" class="drawer-close" type="button" aria-label="Đóng">×</button>
       <div class="auth-modal-head">
-        <span class="eyebrow">Lehaipreshop Security</span>
+        <span class="eyebrow"> Security</span>
         <h2 id="login-title">Đăng nhập tài khoản</h2>
         <p>Vui lòng đăng nhập bằng tài khoản Quản trị viên hoặc Cộng tác viên để sử dụng công cụ.</p>
       </div>
       <form id="login-form">
         <label class="auth-field">
           <span>Tên đăng nhập</span>
-          <input id="login-username" type="text" autocomplete="username" required minlength="3" placeholder="Nhập username...">
+          <input id="login-username" type="text" autocomplete="username" required minlength="3"
+            placeholder="Nhập username...">
         </label>
         <label class="auth-field">
           <span>Mật khẩu</span>
-          <input id="login-password" type="password" autocomplete="current-password" required placeholder="Nhập mật khẩu...">
+          <input id="login-password" type="password" autocomplete="current-password" required
+            placeholder="Nhập mật khẩu...">
         </label>
         <div id="login-error" class="auth-error" hidden></div>
         <button id="login-submit" class="button primary auth-btn" type="submit">
@@ -370,15 +377,18 @@
       <form id="change-pass-form">
         <label class="auth-field">
           <span>Mật khẩu hiện tại</span>
-          <input id="cp-old-password" type="password" autocomplete="current-password" required placeholder="Nhập mật khẩu hiện tại...">
+          <input id="cp-old-password" type="password" autocomplete="current-password" required
+            placeholder="Nhập mật khẩu hiện tại...">
         </label>
         <label class="auth-field">
           <span>Mật khẩu mới (≥ 4 ký tự)</span>
-          <input id="cp-new-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+          <input id="cp-new-password" type="password" autocomplete="new-password" required minlength="4"
+            placeholder="Tối thiểu 4 ký tự...">
         </label>
         <label class="auth-field">
           <span>Xác nhận mật khẩu mới</span>
-          <input id="cp-confirm-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Nhập lại mật khẩu mới...">
+          <input id="cp-confirm-password" type="password" autocomplete="new-password" required minlength="4"
+            placeholder="Nhập lại mật khẩu mới...">
         </label>
         <div id="change-pass-error" class="auth-error" hidden></div>
         <div class="confirm-actions">
@@ -401,11 +411,13 @@
       <form id="create-user-form">
         <label class="auth-field">
           <span>Tên đăng nhập (3-50 ký tự: chữ thường, số, _, -)</span>
-          <input id="cu-username" type="text" autocomplete="off" required minlength="3" maxlength="50" placeholder="vd: ctv_hoang">
+          <input id="cu-username" type="text" autocomplete="off" required minlength="3" maxlength="50"
+            placeholder="vd: ctv_hoang">
         </label>
         <label class="auth-field">
           <span>Mật khẩu khởi tạo (≥ 4 ký tự)</span>
-          <input id="cu-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+          <input id="cu-password" type="password" autocomplete="new-password" required minlength="4"
+            placeholder="Tối thiểu 4 ký tự...">
         </label>
         <div id="cu-error" class="auth-error" hidden></div>
         <div class="confirm-actions">
@@ -429,7 +441,8 @@
         <input type="hidden" id="arp-user-id">
         <label class="auth-field">
           <span>Mật khẩu mới (≥ 4 ký tự)</span>
-          <input id="arp-password" type="password" autocomplete="new-password" required minlength="4" placeholder="Tối thiểu 4 ký tự...">
+          <input id="arp-password" type="password" autocomplete="new-password" required minlength="4"
+            placeholder="Tối thiểu 4 ký tự...">
         </label>
         <div id="arp-error" class="auth-error" hidden></div>
         <div class="confirm-actions">
